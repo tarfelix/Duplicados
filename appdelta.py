@@ -223,7 +223,7 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         doc_ref.set(log_entry)
     except Exception as e:
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
-        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="�")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
 
 
 # =============================================================================
@@ -540,7 +540,7 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
 
     st.sidebar.header("👁️ Filtros de Exibição")
     # Filtros de data e escopo
-    dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=10, step=1)
+    dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=30, step=1)
     data_inicio = st.sidebar.date_input("Data Início", date.today() - timedelta(days=DEFAULTS["dias_filtro_inicio"]))
     data_fim = st.sidebar.date_input("Data Fim", date.today() + timedelta(days=DEFAULTS["dias_filtro_fim"]))
     
@@ -554,6 +554,9 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
     pastas_sel = st.sidebar.multiselect("Filtrar por Pastas", pastas_opts)
     status_sel = st.sidebar.multiselect("Filtrar por Status", status_opts, default=default_statuses)
     
+    # NOVO FILTRO
+    only_groups_with_open = st.sidebar.toggle("Apenas grupos com atividades abertas", value=True, help="Se ativo, mostra apenas grupos que contenham pelo menos uma atividade no estado 'Aberta'.")
+
     # Modo de exibição estrito
     strict_only = st.sidebar.toggle("Modo Estrito", value=True, help="Exibe apenas itens com similaridade e containment acima do limiar em relação ao item principal do grupo.")
 
@@ -572,20 +575,31 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
         min_sim=min_sim, min_containment=min_containment, pre_delta=pre_delta,
         diff_limit=diff_limit, dias_hist=dias_hist, data_inicio=data_inicio, data_fim=data_fim,
         pastas=pastas_sel, status=status_sel, use_cnj=use_cnj,
-        strict_only=strict_only
+        strict_only=strict_only, only_groups_with_open=only_groups_with_open
     )
 
 def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
-    """Calcula qual item do grupo é o 'melhor principal' (medoid)."""
+    """
+    Calcula qual item do grupo é o 'melhor principal' (medoid).
+    LÓGICA ATUALIZADA: Prioriza atividades que NÃO estão 'Abertas'.
+    """
     if not group_rows:
         return ""
         
+    # Separa os candidatos em 'fechados' (prioritários) e 'abertos'
+    closed_candidates = [r for r in group_rows if r.get("activity_status") != "Aberta"]
+    open_candidates = [r for r in group_rows if r.get("activity_status") == "Aberta"]
+
+    # A lista de candidatos para o cálculo agora prioriza os fechados
+    candidates = closed_candidates + open_candidates
+    if not candidates:
+        return group_rows[0]['activity_id'] # Fallback caso todos sejam None
+
     best_id, max_avg_score = None, -1.0
     
-    # Cache para evitar recalcular normalizações e metadados
     cache = {r['activity_id']: (normalize_for_match(r.get('Texto', ''), []), extract_meta(r.get('Texto', ''))) for r in group_rows}
 
-    for candidate in group_rows:
+    for candidate in candidates:
         candidate_id = candidate['activity_id']
         c_norm, c_meta = cache[candidate_id]
         scores = []
@@ -598,10 +612,18 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
                 scores.append(score)
         
         avg_score = sum(scores) / len(scores) if scores else 0.0
-        if avg_score > max_avg_score:
+
+        # A primeira atividade fechada que tiver um score médio já se torna a melhor candidata
+        if best_id is None or avg_score > max_avg_score:
             max_avg_score, best_id = avg_score, candidate_id
+        
+        # Se já encontramos um principal fechado, não precisamos avaliar os abertos se eles não tiverem um score significativamente maior
+        if candidate in closed_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
+            pass # Continua para ver se há um fechado melhor
+        elif candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
+            break # Já temos um principal fechado, paramos aqui
             
-    return best_id or group_rows[0]['activity_id'] # Fallback para o primeiro item
+    return best_id or group_rows[0]['activity_id']
 
 def render_group(group_rows: List[Dict], params: Dict, db_firestore):
     """Renderiza um único grupo de atividades duplicadas."""
@@ -985,6 +1007,11 @@ def main():
 
     with tab1:
         groups = criar_grupos_de_duplicatas(df_view, params)
+        
+        # Filtra os grupos para mostrar apenas os que têm atividades abertas, se a opção estiver marcada
+        if params["only_groups_with_open"]:
+            groups = [g for g in groups if any(r.get("activity_status") == "Aberta" for r in g)]
+
         st.metric("Grupos de Duplicatas Encontrados", len(groups))
 
         page_size = st.number_input("Grupos por página", min_value=5, value=DEFAULTS["itens_por_pagina"], step=5)
