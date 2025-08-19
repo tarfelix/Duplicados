@@ -15,6 +15,7 @@ Funcionalidades Principais:
 - Integração com API de cancelamento, incluindo resiliência (tentativas, rate-limit) e modo de teste (dry-run).
 - Painel de calibração para ajustar os limiares de similaridade por pasta.
 - Log de auditoria de todas as ações no Google Firestore com visualização na interface.
+- Melhorias de UX: Botão "Marcar Todos", cálculo automático do principal e diálogo de confirmação.
 """
 from __future__ import annotations
 
@@ -69,13 +70,14 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit, para evitar colisões
-SUFFIX = "_v3_firebase"
+SUFFIX = "_v4_ux"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
     PAGE_NUMBER = f"page_{SUFFIX}"
     GROUP_STATES = f"group_states_{SUFFIX}"
     CFG = f"cfg_{SUFFIX}"
+    SHOW_CANCEL_CONFIRM = f"show_cancel_confirm_{SUFFIX}"
 
 # Valores padrão caso não sejam definidos nos secrets
 DEFAULTS = {
@@ -571,6 +573,9 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
 
 def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
     """Calcula qual item do grupo é o 'melhor principal' (medoid)."""
+    if not group_rows:
+        return ""
+        
     best_id, max_avg_score = None, -1.0
     
     # Cache para evitar recalcular normalizações e metadados
@@ -601,14 +606,14 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
     
     # Inicializa ou recupera o estado deste grupo
     state = st.session_state[SK.GROUP_STATES].setdefault(group_id, {
-        "principal_id": group_rows[0]["activity_id"],
+        "principal_id": None, # Será calculado automaticamente
         "open_compare": None,
         "cancelados": set()
     })
 
-    # Garante que o principal_id ainda existe no grupo (pode mudar com filtros)
-    if not any(r["activity_id"] == state["principal_id"] for r in group_rows):
-        state["principal_id"] = group_rows[0]["activity_id"]
+    # Cálculo automático do melhor principal na primeira renderização do grupo
+    if state["principal_id"] is None or not any(r["activity_id"] == state["principal_id"] for r in group_rows):
+        state["principal_id"] = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
 
     principal = next(r for r in group_rows if r["activity_id"] == state["principal_id"])
     p_norm = normalize_for_match(principal.get("Texto", ""), [])
@@ -627,27 +632,40 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
     else:
         visible_rows = group_rows
 
-    expander_title = f"Grupo com {len(group_rows)} itens (exibindo {len(visible_rows)}) — Pasta: {group_rows[0].get('activity_folder', '')}"
+    # Monta o título informativo do expander
+    open_count = sum(1 for r in group_rows if r.get('activity_status') == 'Aberta')
+    expander_title = (
+        f"Grupo: {len(group_rows)} itens ({open_count} Abertas) | "
+        f"Pasta: {group_rows[0].get('activity_folder', '')} | "
+        f"Principal Sugerido: #{state['principal_id']}"
+    )
     
     with st.expander(expander_title):
-        col1, col2 = st.columns([0.7, 0.3])
-        with col1:
-            st.info("Dica: para marcar um item para cancelar, primeiro clique em '⚖️ Comparar com Principal'.")
-        with col2:
-            if st.button("⭐ Definir Melhor Principal", key=f"auto_princ_{group_id}", use_container_width=True):
+        # --- Cabeçalho de Ações do Grupo ---
+        cols = st.columns([0.5, 0.5])
+        with cols[0]:
+            if st.button("⭐ Recalcular Melhor Principal", key=f"recalc_princ_{group_id}", use_container_width=True):
                 best_id = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
                 log_action_to_firestore(db_firestore, user, "set_principal", {
-                    "group_id": group_id,
-                    "previous_principal_id": state["principal_id"],
-                    "new_principal_id": best_id,
-                    "method": "automatic"
+                    "group_id": group_id, "previous_principal_id": state["principal_id"],
+                    "new_principal_id": best_id, "method": "automatic_recalc"
                 })
                 state["principal_id"] = best_id
-                state["open_compare"] = None # Fecha comparações abertas
+                state["open_compare"] = None
+                st.rerun()
+        with cols[1]:
+            if st.button("🗑️ Marcar Todos para Cancelar", key=f"cancel_all_{group_id}", use_container_width=True):
+                ids_to_cancel = {r['activity_id'] for r in visible_rows if r['activity_id'] != state['principal_id']}
+                state['cancelados'].update(ids_to_cancel)
+                log_action_to_firestore(db_firestore, user, "mark_all_cancel", {
+                    "group_id": group_id, "principal_id": state["principal_id"],
+                    "cancelled_ids": list(ids_to_cancel)
+                })
                 st.rerun()
 
         st.markdown("---")
 
+        # --- Renderização dos Itens do Grupo ---
         for row in visible_rows:
             rid = row["activity_id"]
             is_principal = (rid == state["principal_id"])
@@ -662,84 +680,63 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                 st.markdown(f"<div class='{card_class}'>", unsafe_allow_html=True)
                 c1, c2 = st.columns([0.7, 0.3])
                 with c1:
-                    # Informações básicas da atividade
                     dt = pd.to_datetime(row.get("activity_date")).tz_localize(TZ_UTC).tz_convert(TZ_SP) if pd.notna(row.get("activity_date")) else None
                     st.markdown(f"**ID:** `{rid}` {'⭐ **Principal**' if is_principal else ''} {'🗑️ **Marcado p/ Cancelar**' if is_marked_for_cancel else ''}")
                     st.caption(f"**Data:** {dt.strftime('%d/%m/%Y %H:%M') if dt else 'N/A'} | **Status:** {row.get('activity_status','')} | **Usuário:** {row.get('user_profile_name','')}")
 
-                    # Badge de similaridade
                     if not is_principal:
                         r_norm = normalize_for_match(row.get("Texto", ""), [])
                         r_meta = extract_meta(row.get("Texto", ""))
                         score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
-                        
                         score_pct = params['min_sim'] * 100
                         badge_color = "badge-green" if score >= score_pct + 5 else "badge-yellow" if score >= score_pct else "badge-red"
                         tooltip = f"Set: {details['set']:.0f}% | Sort: {details['sort']:.0f}% | Contain: {details['contain']:.0f}% | Bônus: {details['bonus']}"
                         st.markdown(f"<span class='similarity-badge {badge_color}' title='{tooltip}'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
 
-                    # Texto resumido
                     st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}")
 
                 with c2:
-                    # Botões de ação
                     if not is_principal:
                         if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
                             log_action_to_firestore(db_firestore, user, "set_principal", {
-                                "group_id": group_id,
-                                "previous_principal_id": state["principal_id"],
-                                "new_principal_id": rid,
-                                "method": "manual"
+                                "group_id": group_id, "previous_principal_id": state["principal_id"],
+                                "new_principal_id": rid, "method": "manual"
                             })
                             state["principal_id"] = rid
                             state["open_compare"] = None
                             st.rerun()
                         
                         if st.button("⚖️ Comparar com Principal", key=f"cmp_{rid}", use_container_width=True):
-                            state["open_compare"] = rid if not is_comparing else None # Toggle
+                            state["open_compare"] = rid if not is_comparing else None
                             st.rerun()
 
-                    # Checkbox de cancelamento (só aparece após comparar)
                     if not is_principal and is_comparing:
                         st.markdown("---")
                         cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
                         if cancel_checked != is_marked_for_cancel:
                             action = "mark_cancel" if cancel_checked else "unmark_cancel"
                             log_action_to_firestore(db_firestore, user, action, {
-                                "group_id": group_id,
-                                "principal_id": state["principal_id"],
+                                "group_id": group_id, "principal_id": state["principal_id"],
                                 "target_activity_id": rid
                             })
-                            if cancel_checked:
-                                state["cancelados"].add(rid)
-                            else:
-                                state["cancelados"].discard(rid)
+                            if cancel_checked: state["cancelados"].add(rid)
+                            else: state["cancelados"].discard(rid)
                             st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        # Se uma comparação estiver aberta, renderiza o diff
         if state["open_compare"]:
             comparado_row = next((r for r in group_rows if r["activity_id"] == state["open_compare"]), None)
             if comparado_row:
                 st.markdown("---")
                 st.subheader("Comparação Detalhada (Diff)")
-                
-                # Legenda para o Diff
                 st.markdown(
-                    """
-                    <div style='margin-bottom: 10px;'>
-                        <strong>Legenda:</strong>
-                        <span style='background-color: #c8e6c9; padding: 2px 5px; border-radius: 3px;'>Texto adicionado</span>
-                        <span style='background-color: #ffcdd2; padding: 2px 5px; border-radius: 3px; margin-left: 10px;'>Texto removido</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
+                    """<div style='margin-bottom: 10px;'><strong>Legenda:</strong>
+                       <span style='background-color: #c8e6c9; padding: 2px 5px; border-radius: 3px;'>Texto adicionado</span>
+                       <span style='background-color: #ffcdd2; padding: 2px 5px; border-radius: 3px; margin-left: 10px;'>Texto removido</span>
+                    </div>""", unsafe_allow_html=True)
                 c1, c2 = st.columns(2)
                 c1.markdown(f"**Principal: ID `{principal['activity_id']}`**")
                 c2.markdown(f"**Comparado: ID `{comparado_row['activity_id']}`**")
-                
                 hA, hB = highlight_diffs_safe(principal.get("Texto", ""), comparado_row.get("Texto", ""), params['diff_limit'])
                 c1.markdown(hA, unsafe_allow_html=True)
                 c2.markdown(hB, unsafe_allow_html=True)
@@ -754,46 +751,23 @@ def export_groups_csv(groups: List[List[Dict]]) -> bytes:
     for i, g in enumerate(groups):
         for r in g:
             rows.append({
-                "group_index": i + 1,
-                "group_size": len(g),
-                "activity_id": r.get("activity_id"),
-                "activity_folder": r.get("activity_folder"),
-                "activity_date": r.get("activity_date"),
-                "activity_status": r.get("activity_status"),
-                "user_profile_name": r.get("user_profile_name"),
+                "group_index": i + 1, "group_size": len(g), "activity_id": r.get("activity_id"),
+                "activity_folder": r.get("activity_folder"), "activity_date": r.get("activity_date"),
+                "activity_status": r.get("activity_status"), "user_profile_name": r.get("user_profile_name"),
                 "Texto": r.get("Texto","")
             })
     if not rows: return b""
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
 
-def process_cancellations(groups: List[List[Dict]], user: str, db_firestore):
-    """Processa todos os cancelamentos marcados na interface."""
+def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_firestore):
+    """Lógica de cancelamento que é chamada pelo diálogo de confirmação."""
     client = api_client()
     if not client:
-        st.error("Cliente de API não configurado. Não é possível processar cancelamentos.")
+        st.error("Cliente de API não configurado.")
         return
 
-    # Atualiza o modo dry_run do cliente com base na seleção da UI
     client.dry_run = st.session_state[SK.CFG].get("dry_run", True)
     
-    to_cancel_with_context = []
-    for g in groups:
-        gid = g[0]["activity_id"]
-        state = st.session_state[SK.GROUP_STATES].get(gid, {})
-        principal_id = state.get("principal_id")
-        
-        if principal_id:
-            for cancel_id in state.get("cancelados", set()):
-                to_cancel_with_context.append({
-                    "group_id": gid,
-                    "cancel_id": cancel_id,
-                    "principal_id": principal_id
-                })
-
-    if not to_cancel_with_context:
-        st.info("Nenhuma atividade foi marcada para cancelamento.")
-        return
-
     st.info(f"Iniciando o cancelamento de {len(to_cancel_with_context)} atividades...")
     progress = st.progress(0)
     results = {"ok": 0, "err": 0}
@@ -802,28 +776,20 @@ def process_cancellations(groups: List[List[Dict]], user: str, db_firestore):
         act_id = item["cancel_id"]
         principal_id = item["principal_id"]
         try:
-            response = client.activity_canceled(
-                activity_id=act_id,
-                user_name=user,
-                principal_id=principal_id
-            )
-            # CORREÇÃO: Considera sucesso se o código for '200' OU se 'ok'/'success' for True
+            response = client.activity_canceled(activity_id=act_id, user_name=user, principal_id=principal_id)
             if response and (response.get("ok") or response.get("success") or response.get("code") == '200'):
                 results["ok"] += 1
                 log_action_to_firestore(db_firestore, user, "process_cancellation_success", item)
-                logging.info(f"Sucesso ao cancelar {act_id}.")
             else:
                 results["err"] += 1
                 item["api_response"] = response
                 log_action_to_firestore(db_firestore, user, "process_cancellation_failure", item)
                 st.warning(f"Falha ao cancelar {act_id}. Resposta: {response}")
-                logging.error(f"Falha ao cancelar {act_id}. Resposta: {response}")
         except Exception as e:
             results["err"] += 1
             item["exception"] = str(e)
             log_action_to_firestore(db_firestore, user, "process_cancellation_exception", item)
             st.error(f"Erro de exceção ao cancelar {act_id}: {e}")
-            logging.exception(f"Erro de exceção ao cancelar {act_id}")
         
         progress.progress((i + 1) / len(to_cancel_with_context))
 
@@ -831,16 +797,50 @@ def process_cancellations(groups: List[List[Dict]], user: str, db_firestore):
     if client.dry_run:
         st.warning("Atenção: O modo Teste (Dry-run) está ativo. Nenhuma atividade foi realmente cancelada.")
     
-    # Limpa os estados de cancelamento após o processamento
-    for g in groups:
-        gid = g[0]["activity_id"]
-        if gid in st.session_state[SK.GROUP_STATES]:
-            st.session_state[SK.GROUP_STATES][gid]["cancelados"].clear()
-    
-    # Força a atualização dos dados para refletir as mudanças
+    # Limpa os estados de cancelamento e força a atualização dos dados
+    for g_state in st.session_state[SK.GROUP_STATES].values():
+        g_state["cancelados"].clear()
     carregar_dados_mysql.clear()
     st.session_state.pop(SK.SIMILARITY_CACHE, None)
+    st.session_state[SK.SHOW_CANCEL_CONFIRM] = False
     st.rerun()
+
+@st.dialog("Confirmação de Cancelamento")
+def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestore):
+    """Mostra um diálogo de confirmação antes de processar os cancelamentos."""
+    to_cancel_with_context = []
+    for g in groups:
+        gid = g[0]["activity_id"]
+        state = st.session_state[SK.GROUP_STATES].get(gid, {})
+        principal_id = state.get("principal_id")
+        if principal_id:
+            for cancel_id in state.get("cancelados", set()):
+                to_cancel_with_context.append({
+                    "group_id": gid, "cancel_id": cancel_id, "principal_id": principal_id
+                })
+
+    if not to_cancel_with_context:
+        st.info("Nenhuma atividade foi marcada para cancelamento.")
+        if st.button("Fechar"):
+            st.session_state[SK.SHOW_CANCEL_CONFIRM] = False
+            st.rerun()
+        return
+
+    st.warning("Atenção: A ação a seguir é irreversível.")
+    st.write(f"Você está prestes a cancelar **{len(to_cancel_with_context)}** atividades.")
+    
+    # Exibe uma tabela de confirmação
+    display_data = [{"ID a Cancelar": item['cancel_id'], "Duplicata do Principal": item['principal_id']} for item in to_cancel_with_context]
+    st.dataframe(display_data, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("✅ Confirmar e Cancelar", type="primary", use_container_width=True):
+            process_cancellations(to_cancel_with_context, user, db_firestore)
+    with col2:
+        if st.button("Voltar", use_container_width=True):
+            st.session_state[SK.SHOW_CANCEL_CONFIRM] = False
+            st.rerun()
 
 def render_calibration_tab(df: pd.DataFrame):
     """Renderiza a aba de calibração para análise de similaridade."""
@@ -863,13 +863,11 @@ def render_calibration_tab(df: pd.DataFrame):
         if len(sample_df) < 2:
             st.warning("A pasta selecionada tem menos de 2 atividades para comparar."); return
 
-        # Prepara dados para análise
         stopwords_extra = st.secrets.get("similarity", {}).get("stopwords_extra", [])
         sample_df["_meta"] = sample_df["Texto"].apply(extract_meta)
         sample_df["_norm"] = sample_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra))
         sample_df = sample_df.reset_index()
 
-        # Gera pares aleatórios
         n = len(sample_df)
         indices = np.arange(n)
         pairs = set()
@@ -892,7 +890,6 @@ def render_calibration_tab(df: pd.DataFrame):
             st.info("Nenhum par encontrado após aplicar o filtro de containment."); return
             
         df_scores = pd.DataFrame(scores)
-        
         st.write("Estatísticas Descritivas dos Scores:")
         st.dataframe(df_scores["score"].describe(percentiles=[.25, .5, .75, .9, .95, .99]))
 
@@ -900,20 +897,15 @@ def render_calibration_tab(df: pd.DataFrame):
             chart = alt.Chart(df_scores).mark_bar().encode(
                 x=alt.X("score:Q", bin=alt.Bin(maxbins=50), title="Score de Similaridade"),
                 y=alt.Y("count()", title="Contagem de Pares")
-            ).properties(
-                title=f"Distribuição de Similaridade para a Pasta: {pasta}",
-                height=300
-            )
+            ).properties(title=f"Distribuição de Similaridade para a Pasta: {pasta}", height=300)
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.warning("Biblioteca 'altair' não instalada. Exibindo gráfico simples.")
             st.line_chart(df_scores["score"])
 
 @st.cache_data(ttl=600)
 def get_firestore_history(_db, limit=100):
     """Busca os últimos registros de auditoria do Firestore."""
-    if _db is None:
-        return []
+    if _db is None: return []
     try:
         docs = _db.collection("duplicidade_actions").order_by("ts", direction=firestore.Query.DESCENDING).limit(limit).stream()
         return [doc.to_dict() for doc in docs]
@@ -924,7 +916,6 @@ def get_firestore_history(_db, limit=100):
 def render_history_tab(db_firestore):
     """Renderiza a aba de histórico de ações."""
     st.subheader("📜 Histórico de Ações (Auditoria)")
-    
     if db_firestore is None:
         st.warning("A conexão com o Firebase (auditoria) não está ativa.")
         return
@@ -933,25 +924,18 @@ def render_history_tab(db_firestore):
         get_firestore_history.clear()
 
     history = get_firestore_history(db_firestore)
-
     if not history:
         st.info("Nenhum registro de auditoria encontrado.")
         return
 
     for log in history:
         ts = log.get("ts")
-        if isinstance(ts, datetime):
-            ts_local = ts.astimezone(TZ_SP)
-            timestamp_str = ts_local.strftime('%d/%m/%Y %H:%M:%S')
-        else:
-            timestamp_str = "Data indisponível"
-        
+        ts_local = ts.astimezone(TZ_SP) if isinstance(ts, datetime) else None
+        timestamp_str = ts_local.strftime('%d/%m/%Y %H:%M:%S') if ts_local else "Data indisponível"
         user = log.get("user", "N/A")
         action = log.get("action", "N/A").replace("_", " ").title()
-        
         with st.expander(f"**{action}** por **{user}** em {timestamp_str}"):
             st.json(log.get("details", {}))
-
 
 # =============================================================================
 # FLUXO PRINCIPAL DO APLICATIVO
@@ -961,18 +945,15 @@ def main():
     """Função principal que executa o aplicativo Streamlit."""
     st.title(APP_TITLE)
     
-    # Inicializa o session_state
-    for key in [SK.USERNAME, SK.SIMILARITY_CACHE, SK.PAGE_NUMBER, SK.GROUP_STATES, SK.CFG]:
+    for key in [SK.USERNAME, SK.SIMILARITY_CACHE, SK.PAGE_NUMBER, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM]:
         if key not in st.session_state:
-            st.session_state[key] = 0 if key == SK.PAGE_NUMBER else {}
+            st.session_state[key] = False if key == SK.SHOW_CANCEL_CONFIRM else 0 if key == SK.PAGE_NUMBER else {}
 
-    # Login simples para registrar o usuário nas ações
     if not st.session_state.get(SK.USERNAME):
         with st.sidebar.form("login_form"):
             username = st.text_input("Nome de Usuário")
             password = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar"):
-                # Validação de credenciais a partir de st.secrets
                 if username and password and st.secrets.credentials.usernames.get(username) == password:
                     st.session_state[SK.USERNAME] = username
                     st.rerun()
@@ -983,42 +964,30 @@ def main():
 
     engine = db_engine_mysql()
     db_firestore = init_firebase()
-
-    df_full = carregar_dados_mysql(engine, 365) # Carrega um ano para os filtros
-    
+    df_full = carregar_dados_mysql(engine, 365)
     params = sidebar_controls(df_full)
-    
-    # Carrega os dados para o período de análise selecionado
     df_analysis = carregar_dados_mysql(engine, params["dias_hist"])
+    
     if df_analysis.empty:
         st.warning("Nenhuma atividade encontrada para o período de análise selecionado.")
         st.stop()
 
-    # Aplica filtros de visualização (data, pasta, status)
-    mask = (
-        (df_analysis["activity_date"].dt.date >= params["data_inicio"]) &
-        (df_analysis["activity_date"].dt.date <= params["data_fim"])
-    )
+    mask = ((df_analysis["activity_date"].dt.date >= params["data_inicio"]) & (df_analysis["activity_date"].dt.date <= params["data_fim"]))
     if params["pastas"]: mask &= df_analysis["activity_folder"].isin(params["pastas"])
     if params["status"]: mask &= df_analysis["activity_status"].isin(params["status"])
     df_view = df_analysis[mask].copy()
 
-    # Abas principais da aplicação
     tab1, tab2, tab3 = st.tabs(["🔎 Análise de Duplicidades", "📊 Calibração", "📜 Histórico de Ações"])
 
     with tab1:
         groups = criar_grupos_de_duplicatas(df_view, params)
-        
         st.metric("Grupos de Duplicatas Encontrados", len(groups))
 
-        # Paginação dos grupos
         page_size = st.number_input("Grupos por página", min_value=5, value=DEFAULTS["itens_por_pagina"], step=5)
         total_pages = max(1, math.ceil(len(groups) / page_size))
         page_num = st.number_input("Página", min_value=1, max_value=total_pages, value=1, step=1)
-        
         start_idx = (page_num - 1) * page_size
         end_idx = start_idx + page_size
-        
         st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(groups))} de {len(groups)}")
 
         for group in groups[start_idx:end_idx]:
@@ -1028,24 +997,19 @@ def main():
         st.header("⚡ Ações em Massa")
         col_a, col_b = st.columns(2)
         with col_a:
-            csv_data = export_groups_csv(groups)
-            st.download_button(
-                "⬇️ Exportar Grupos para CSV",
-                data=csv_data,
-                file_name="relatorio_duplicatas.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.download_button("⬇️ Exportar Grupos para CSV", data=export_groups_csv(groups),
+                               file_name="relatorio_duplicatas.csv", mime="text/csv", use_container_width=True)
         with col_b:
             if st.button("🚀 Processar Cancelamentos Marcados", type="primary", use_container_width=True):
-                process_cancellations(groups, st.session_state.get(SK.USERNAME), db_firestore)
+                st.session_state[SK.SHOW_CANCEL_CONFIRM] = True
+        
+        if st.session_state.get(SK.SHOW_CANCEL_CONFIRM):
+            confirm_cancellation_dialog(groups, st.session_state.get(SK.USERNAME), db_firestore)
 
     with tab2:
         render_calibration_tab(df_full)
-
     with tab3:
         render_history_tab(db_firestore)
-
 
 if __name__ == "__main__":
     main()
