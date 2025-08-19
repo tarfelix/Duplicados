@@ -70,7 +70,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit, para evitar colisões
-SUFFIX = "_v4_ux"
+SUFFIX = "_v5_final"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
@@ -78,6 +78,8 @@ class SK:
     GROUP_STATES = f"group_states_{SUFFIX}"
     CFG = f"cfg_{SUFFIX}"
     SHOW_CANCEL_CONFIRM = f"show_cancel_confirm_{SUFFIX}"
+    IGNORED_GROUPS = f"ignored_groups_{SUFFIX}"
+
 
 # Valores padrão caso não sejam definidos nos secrets
 DEFAULTS = {
@@ -668,9 +670,9 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
     
     with st.expander(expander_title):
         # --- Cabeçalho de Ações do Grupo ---
-        cols = st.columns([0.5, 0.5])
+        cols = st.columns([1/3, 1/3, 1/3])
         with cols[0]:
-            if st.button("⭐ Recalcular Melhor Principal", key=f"recalc_princ_{group_id}", use_container_width=True):
+            if st.button("⭐ Recalcular Principal", key=f"recalc_princ_{group_id}", use_container_width=True):
                 best_id = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
                 log_action_to_firestore(db_firestore, user, "set_principal", {
                     "group_id": group_id, "previous_principal_id": state["principal_id"],
@@ -680,12 +682,20 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                 state["open_compare"] = None
                 st.rerun()
         with cols[1]:
-            if st.button("🗑️ Marcar Todos para Cancelar", key=f"cancel_all_{group_id}", use_container_width=True):
+            if st.button("🗑️ Marcar Todos p/ Cancelar", key=f"cancel_all_{group_id}", use_container_width=True):
                 ids_to_cancel = {r['activity_id'] for r in visible_rows if r['activity_id'] != state['principal_id']}
                 state['cancelados'].update(ids_to_cancel)
                 log_action_to_firestore(db_firestore, user, "mark_all_cancel", {
                     "group_id": group_id, "principal_id": state["principal_id"],
                     "cancelled_ids": list(ids_to_cancel)
+                })
+                st.rerun()
+        with cols[2]:
+            if st.button("👍 Não é Duplicado", key=f"not_dup_{group_id}", use_container_width=True):
+                st.session_state[SK.IGNORED_GROUPS].add(group_id)
+                log_action_to_firestore(db_firestore, user, "mark_not_duplicate", {
+                    "group_id": group_id,
+                    "member_ids": [r['activity_id'] for r in group_rows]
                 })
                 st.rerun()
 
@@ -799,8 +809,8 @@ def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_fire
     results = {"ok": 0, "err": 0}
     
     for i, item in enumerate(to_cancel_with_context):
-        act_id = item["cancel_id"]
-        principal_id = item["principal_id"]
+        act_id = item["ID a Cancelar"]
+        principal_id = item["Duplicata do Principal"]
         try:
             response = client.activity_canceled(activity_id=act_id, user_name=user, principal_id=principal_id)
             if response and (response.get("ok") or response.get("success") or response.get("code") == '200'):
@@ -832,17 +842,40 @@ def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_fire
     st.rerun()
 
 @st.dialog("Confirmação de Cancelamento")
-def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestore):
+def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestore, params: Dict):
     """Mostra um diálogo de confirmação antes de processar os cancelamentos."""
     to_cancel_with_context = []
+    
+    # Cache para scores
+    score_cache = {}
+
     for g in groups:
         gid = g[0]["activity_id"]
         state = st.session_state[SK.GROUP_STATES].get(gid, {})
         principal_id = state.get("principal_id")
         if principal_id:
+            principal_row = next((r for r in g if r['activity_id'] == principal_id), None)
+            if not principal_row: continue
+
+            p_norm = normalize_for_match(principal_row.get("Texto", ""), [])
+            p_meta = extract_meta(principal_row.get("Texto", ""))
+
             for cancel_id in state.get("cancelados", set()):
+                cancel_row = next((r for r in g if r['activity_id'] == cancel_id), None)
+                if not cancel_row: continue
+
+                # Calcula a similaridade para exibir na confirmação
+                if (principal_id, cancel_id) not in score_cache:
+                    c_norm = normalize_for_match(cancel_row.get("Texto", ""), [])
+                    c_meta = extract_meta(cancel_row.get("Texto", ""))
+                    score, _ = combined_score(p_norm, c_norm, p_meta, c_meta)
+                    score_cache[(principal_id, cancel_id)] = score
+
                 to_cancel_with_context.append({
-                    "group_id": gid, "cancel_id": cancel_id, "principal_id": principal_id
+                    "ID a Cancelar": cancel_id,
+                    "Duplicata do Principal": principal_id,
+                    "Pasta": cancel_row.get("activity_folder", "N/A"),
+                    "Similaridade (%)": f"{score_cache[(principal_id, cancel_id)]:.0f}"
                 })
 
     if not to_cancel_with_context:
@@ -855,9 +888,7 @@ def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestor
     st.warning("Atenção: A ação a seguir é irreversível.")
     st.write(f"Você está prestes a cancelar **{len(to_cancel_with_context)}** atividades.")
     
-    # Exibe uma tabela de confirmação
-    display_data = [{"ID a Cancelar": item['cancel_id'], "Duplicata do Principal": item['principal_id']} for item in to_cancel_with_context]
-    st.dataframe(display_data, use_container_width=True)
+    st.dataframe(to_cancel_with_context, use_container_width=True)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -971,9 +1002,9 @@ def main():
     """Função principal que executa o aplicativo Streamlit."""
     st.title(APP_TITLE)
     
-    for key in [SK.USERNAME, SK.SIMILARITY_CACHE, SK.PAGE_NUMBER, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM]:
+    for key in [SK.USERNAME, SK.SIMILARITY_CACHE, SK.PAGE_NUMBER, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM, SK.IGNORED_GROUPS]:
         if key not in st.session_state:
-            st.session_state[key] = False if key == SK.SHOW_CANCEL_CONFIRM else 0 if key == SK.PAGE_NUMBER else {}
+            st.session_state[key] = set() if key == SK.IGNORED_GROUPS else False if key == SK.SHOW_CANCEL_CONFIRM else 0 if key == SK.PAGE_NUMBER else {}
 
     if not st.session_state.get(SK.USERNAME):
         with st.sidebar.form("login_form"):
@@ -1008,7 +1039,9 @@ def main():
     with tab1:
         groups = criar_grupos_de_duplicatas(df_view, params)
         
-        # Filtra os grupos para mostrar apenas os que têm atividades abertas, se a opção estiver marcada
+        # Filtra os grupos ignorados pelo usuário
+        groups = [g for g in groups if g[0]['activity_id'] not in st.session_state[SK.IGNORED_GROUPS]]
+        
         if params["only_groups_with_open"]:
             groups = [g for g in groups if any(r.get("activity_status") == "Aberta" for r in g)]
 
@@ -1035,7 +1068,7 @@ def main():
                 st.session_state[SK.SHOW_CANCEL_CONFIRM] = True
         
         if st.session_state.get(SK.SHOW_CANCEL_CONFIRM):
-            confirm_cancellation_dialog(groups, st.session_state.get(SK.USERNAME), db_firestore)
+            confirm_cancellation_dialog(groups, st.session_state.get(SK.USERNAME), db_firestore, params)
 
     with tab2:
         render_calibration_tab(df_full)
