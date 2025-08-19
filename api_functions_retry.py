@@ -130,7 +130,7 @@ class HttpClientRetry:
 
         if self.dry_run:
             logging.info(f"[DRY-RUN] Simulado o cancelamento da atividade ID: {activity_id} com a observação: '{observation_message}'")
-            return {"ok": True, "success": True, "message": "Dry run mode"}
+            return {"ok": True, "success": True, "message": "Dry run mode", "code": "200"}
 
         endpoint = f"activity/{self.entity_id}/activitycanceledduplicate"
         body = {
