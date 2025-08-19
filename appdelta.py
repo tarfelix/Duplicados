@@ -225,7 +225,7 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         doc_ref.set(log_entry)
     except Exception as e:
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
-        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="�")
 
 
 # =============================================================================
@@ -1077,3 +1077,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+�
