@@ -223,7 +223,7 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         doc_ref.set(log_entry)
     except Exception as e:
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
-        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="�")
 
 
 # =============================================================================
@@ -547,8 +547,12 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
     # Filtros de conteúdo
     pastas_opts = sorted(df_full["activity_folder"].dropna().unique()) if not df_full.empty else []
     status_opts = sorted(df_full["activity_status"].dropna().unique()) if not df_full.empty else []
+    
+    # Define os status padrão, excluindo qualquer um que seja 'Cancelado' ou similar
+    default_statuses = [s for s in status_opts if "Cancelad" not in s]
+    
     pastas_sel = st.sidebar.multiselect("Filtrar por Pastas", pastas_opts)
-    status_sel = st.sidebar.multiselect("Filtrar por Status", status_opts)
+    status_sel = st.sidebar.multiselect("Filtrar por Status", status_opts, default=default_statuses)
     
     # Modo de exibição estrito
     strict_only = st.sidebar.toggle("Modo Estrito", value=True, help="Exibe apenas itens com similaridade e containment acima do limiar em relação ao item principal do grupo.")
@@ -1013,3 +1017,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+�
