@@ -418,11 +418,14 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
     dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=30, step=1)
     data_inicio = st.sidebar.date_input("Data Início", date.today() - timedelta(days=DEFAULTS["dias_filtro_inicio"]))
     data_fim = st.sidebar.date_input("Data Fim", date.today() + timedelta(days=DEFAULTS["dias_filtro_fim"]))
-    pastas_opts = sorted(df_full["activity_folder"].dropna().unique()) if not df_full.empty else []
-    status_opts = sorted(df_full["activity_status"].dropna().unique()) if not df_full.empty else []
+    
+    # CORREÇÃO APLICADA AQUI
+    pastas_opts = sorted(df_full["activity_folder"].dropna().astype(str).unique().tolist()) if not df_full.empty else []
+    status_opts = sorted(df_full["activity_status"].dropna().astype(str).unique().tolist()) if not df_full.empty else []
+    
     default_statuses = [s for s in status_opts if "Cancelad" not in s]
-    pastas_sel = st.sidebar.multselect("Filtrar por Pastas", pastas_opts)
-    status_sel = st.sidebar.multselect("Filtrar por Status", status_opts, default=default_statuses)
+    pastas_sel = st.sidebar.multiselect("Filtrar por Pastas", pastas_opts)
+    status_sel = st.sidebar.multiselect("Filtrar por Status", status_opts, default=default_statuses)
     only_groups_with_open = st.sidebar.toggle("Apenas grupos com atividades abertas", value=True)
     strict_only = st.sidebar.toggle("Modo Estrito", value=True)
 
