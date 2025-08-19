@@ -807,7 +807,8 @@ def process_cancellations(groups: List[List[Dict]], user: str, db_firestore):
                 user_name=user,
                 principal_id=principal_id
             )
-            if response and (response.get("ok") or response.get("success")):
+            # CORREÇÃO: Considera sucesso se o código for '200' OU se 'ok'/'success' for True
+            if response and (response.get("ok") or response.get("success") or response.get("code") == '200'):
                 results["ok"] += 1
                 log_action_to_firestore(db_firestore, user, "process_cancellation_success", item)
                 logging.info(f"Sucesso ao cancelar {act_id}.")
