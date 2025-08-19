@@ -542,7 +542,7 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
 
     st.sidebar.header("👁️ Filtros de Exibição")
     # Filtros de data e escopo
-    dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=10, step=1)
+    dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=30, step=1)
     data_inicio = st.sidebar.date_input("Data Início", date.today() - timedelta(days=DEFAULTS["dias_filtro_inicio"]))
     data_fim = st.sidebar.date_input("Data Fim", date.today() + timedelta(days=DEFAULTS["dias_filtro_fim"]))
     
