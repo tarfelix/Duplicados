@@ -1,0 +1,10 @@
+streamlit
+pandas
+rapidfuzz
+unidecode
+SQLAlchemy
+mysql-connector-python
+firebase-admin
+google-cloud-firestore
+altair
+tenacity
