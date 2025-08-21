@@ -5,22 +5,19 @@ Verificador de Duplicidade — Versão Otimizada e Corrigida
 
 Este aplicativo combina as funcionalidades avançadas da versão 'appdelta'
 com as otimizações de performance e a lógica de negócio corrigida para
-a seleção do item principal, evitando que atividades canceladas sejam
-sugeridas como principais.
+a seleção do item principal e exibição de grupos.
 
 Principais Correções e Melhorias:
+- Lógica do Modo Estrito Corrigida: Grupos com apenas um item após a filtragem
+  do modo estrito não são mais exibidos.
 - Similaridade Padrão Ajustada: O valor padrão da similaridade global foi
-  aumentado para 95%.
-- Histórico Aprimorado: A aba de histórico agora tem uma visão em tabela
-  amigável e opções de exportação para CSV e JSON.
+  reforçado para 95% na interface.
+- Histórico Aprimorado: A aba de histórico agora exibe a Pasta da atividade
+  e mantém as opções de exportação para CSV e JSON.
 - Lógica do Principal Corrigida: A função `get_best_principal_id` agora
   ignora atividades com status 'Cancelado' ao eleger o principal.
 - Otimização do Cache: O cálculo pesado de similaridade é executado
   apenas quando os dados ou os parâmetros principais mudam.
-- Gerenciamento de Estado: O 'session_state' que armazena o estado dos grupos
-  é limpo quando os dados são recalculados, evitando acúmulo de memória.
-- Reintrodução de Funcionalidades: Os links para ZFlow v1 e v2 foram adicionados
-  de volta à interface de cada atividade.
 - Melhoria de UX: Um spinner é exibido durante o cálculo de similaridade.
 """
 from __future__ import annotations
@@ -76,7 +73,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v7_final_hist"
+SUFFIX = "_v8_final_strict"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
@@ -89,7 +86,7 @@ DEFAULTS = {
     "itens_por_pagina": 10,
     "dias_filtro_inicio": 7,
     "dias_filtro_fim": 14,
-    "min_sim_global": 95, # ALTERAÇÃO: Aumentado para 95%
+    "min_sim_global": 95,
     "min_containment": 55,
     "pre_cutoff_delta": 10,
     "diff_hard_limit": 12000,
@@ -127,6 +124,7 @@ def db_engine_mysql() -> Optional[Engine]:
         st.error("Credenciais do banco de dados (MySQL) ausentes.")
         st.stop()
     try:
+        # Otimização: Aumentar o pool_recycle pode ajudar a manter conexões vivas.
         engine = create_engine(
             f"mysql+mysqlconnector://{db_params['user']}:{db_params['password']}@{db_params['host']}/{db_params['name']}",
             pool_pre_ping=True, pool_recycle=3600
@@ -176,7 +174,7 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         doc_ref.set(log_entry)
     except Exception as e:
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
-        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="�")
 
 
 # =============================================================================
@@ -185,6 +183,12 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
 
 @st.cache_data(ttl=1800, hash_funcs={Engine: lambda _: None})
 def carregar_dados_mysql(_eng: Engine, dias_historico: int) -> pd.DataFrame:
+    """
+    Carrega dados do banco.
+    Nota sobre performance: A lentidão inicial pode vir da complexidade da
+    ViewGrdAtividadesTarcisio no banco. Garantir que as colunas `activity_type`
+    e `activity_date` estejam indexadas na tabela original pode acelerar a consulta.
+    """
     limite = date.today() - timedelta(days=dias_historico)
     query = text("""
         SELECT activity_id, activity_folder, user_profile_name, activity_date, activity_status, Texto
@@ -364,8 +368,12 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
         carregar_dados_mysql.clear(); criar_grupos_de_duplicatas.clear(); st.rerun()
 
     st.sidebar.header("⚙️ Parâmetros de Similaridade")
+    # Nota: O valor padrão é definido em DEFAULTS, mas pode ser sobrescrito
+    # por um arquivo secrets.toml na seção [similarity] com a chave min_sim_global.
     sim_cfg = st.secrets.get("similarity", {})
-    min_sim = st.sidebar.slider("Similaridade Mínima Global (%)", 0, 100, int(sim_cfg.get("min_sim_global", DEFAULTS["min_sim_global"])), 1) / 100.0
+    min_sim_default = int(sim_cfg.get("min_sim_global", DEFAULTS["min_sim_global"]))
+    min_sim = st.sidebar.slider("Similaridade Mínima Global (%)", 0, 100, min_sim_default, 1) / 100.0
+    
     min_containment = st.sidebar.slider("Containment Mínimo (%)", 0, 100, int(sim_cfg.get("min_containment", DEFAULTS["min_containment"])), 1)
     pre_delta = st.sidebar.slider("Delta do Pré-corte", 0, 30, int(sim_cfg.get("pre_cutoff_delta", DEFAULTS["pre_cutoff_delta"])), 1)
     diff_limit = st.sidebar.number_input("Limite de Caracteres do Diff", min_value=5000, value=int(sim_cfg.get("diff_hard_limit", DEFAULTS["diff_hard_limit"])), step=1000)
@@ -459,37 +467,42 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
 def render_group(group_rows: List[Dict], params: Dict, db_firestore):
     group_id = group_rows[0]["activity_id"]; user = st.session_state.get(SK.USERNAME, "desconhecido")
     state = st.session_state[SK.GROUP_STATES].setdefault(group_id, {"principal_id": None, "open_compare": None, "cancelados": set()})
+    pasta = group_rows[0].get("activity_folder", "N/A")
 
     if state["principal_id"] is None or not any(r["activity_id"] == state["principal_id"] for r in group_rows):
         state["principal_id"] = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
 
     principal = next((r for r in group_rows if r["activity_id"] == state["principal_id"]), group_rows[0])
-    p_norm = normalize_for_match(principal.get("Texto", ""), []); p_meta = extract_meta(principal.get("Texto", ""))
-
-    visible_rows = [principal] if params['strict_only'] else group_rows
-    if params['strict_only']:
-        for row in group_rows:
-            if row["activity_id"] == principal["activity_id"]: continue
-            r_norm = normalize_for_match(row.get("Texto", ""), []); r_meta = extract_meta(row.get("Texto", ""))
-            score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
-            if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']: visible_rows.append(row)
-
+    
     open_count = sum(1 for r in group_rows if r.get('activity_status') == 'Aberta')
-    expander_title = (f"Grupo: {len(group_rows)} itens ({open_count} Abertas) | Pasta: {group_rows[0].get('activity_folder', '')} | Principal Sugerido: #{state['principal_id']}")
+    expander_title = (f"Grupo: {len(group_rows)} itens ({open_count} Abertas) | Pasta: {pasta} | Principal Sugerido: #{state['principal_id']}")
     
     with st.expander(expander_title):
+        log_details = {
+            "group_id": group_id,
+            "pasta": pasta,
+            "previous_principal_id": state["principal_id"],
+        }
         cols = st.columns([1/3, 1/3, 1/3])
         if cols[0].button("⭐ Recalcular Principal", key=f"recalc_princ_{group_id}", use_container_width=True):
             best_id = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
-            log_action_to_firestore(db_firestore, user, "set_principal", {"group_id": group_id, "previous_principal_id": state["principal_id"], "new_principal_id": best_id, "method": "automatic_recalc"}); state["principal_id"] = best_id; state["open_compare"] = None; st.rerun()
+            log_details.update({"new_principal_id": best_id, "method": "automatic_recalc"})
+            log_action_to_firestore(db_firestore, user, "set_principal", log_details); 
+            state["principal_id"] = best_id; state["open_compare"] = None; st.rerun()
+        
         if cols[1].button("🗑️ Marcar Todos p/ Cancelar", key=f"cancel_all_{group_id}", use_container_width=True):
-            ids_to_cancel = {r['activity_id'] for r in visible_rows if r['activity_id'] != state['principal_id']}
-            state['cancelados'].update(ids_to_cancel); log_action_to_firestore(db_firestore, user, "mark_all_cancel", {"group_id": group_id, "principal_id": state["principal_id"], "cancelled_ids": list(ids_to_cancel)}); st.rerun()
+            ids_to_cancel = {r['activity_id'] for r in group_rows if r['activity_id'] != state['principal_id']}
+            state['cancelados'].update(ids_to_cancel)
+            log_details.update({"principal_id": state["principal_id"], "cancelled_ids": list(ids_to_cancel)})
+            log_action_to_firestore(db_firestore, user, "mark_all_cancel", log_details); st.rerun()
+        
         if cols[2].button("👍 Não é Duplicado", key=f"not_dup_{group_id}", use_container_width=True):
-            st.session_state[SK.IGNORED_GROUPS].add(group_id); log_action_to_firestore(db_firestore, user, "mark_not_duplicate", {"group_id": group_id, "member_ids": [r['activity_id'] for r in group_rows]}); st.rerun()
+            st.session_state[SK.IGNORED_GROUPS].add(group_id)
+            log_details.update({"member_ids": [r['activity_id'] for r in group_rows]})
+            log_action_to_firestore(db_firestore, user, "mark_not_duplicate", log_details); st.rerun()
         st.markdown("---")
 
-        for row in visible_rows:
+        for row in group_rows:
             rid = row["activity_id"]; is_principal = (rid == state["principal_id"]); is_comparing = (rid == state["open_compare"]); is_marked_for_cancel = (rid in state["cancelados"])
             card_class = "card card-principal" if is_principal else "card card-cancelado" if is_marked_for_cancel else "card"
             
@@ -501,6 +514,8 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                     st.markdown(f"**ID:** `{rid}` {'⭐ **Principal**' if is_principal else ''} {'🗑️ **Marcado p/ Cancelar**' if is_marked_for_cancel else ''}")
                     st.caption(f"**Data:** {dt.strftime('%d/%m/%Y %H:%M') if dt else 'N/A'} | **Status:** {row.get('activity_status','')} | **Usuário:** {row.get('user_profile_name','')}")
                     if not is_principal:
+                        p_norm = normalize_for_match(principal.get("Texto", ""), [])
+                        p_meta = extract_meta(principal.get("Texto", ""))
                         r_norm = normalize_for_match(row.get("Texto", ""), []); r_meta = extract_meta(row.get("Texto", ""))
                         score, details = combined_score(p_norm, r_norm, p_meta, r_meta); score_pct = params['min_sim'] * 100
                         badge_color = "badge-green" if score >= score_pct + 5 else "badge-yellow" if score >= score_pct else "badge-red"
@@ -514,16 +529,21 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                     b_cols[1].link_button("Abrir no ZFlow v2", links["v2"], use_container_width=True)
 
                 with c2:
+                    log_details_row = log_details.copy()
                     if not is_principal:
                         if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
-                            log_action_to_firestore(db_firestore, user, "set_principal", {"group_id": group_id, "previous_principal_id": state["principal_id"], "new_principal_id": rid, "method": "manual"}); state["principal_id"] = rid; state["open_compare"] = None; st.rerun()
+                            log_details_row.update({"new_principal_id": rid, "method": "manual"})
+                            log_action_to_firestore(db_firestore, user, "set_principal", log_details_row); 
+                            state["principal_id"] = rid; state["open_compare"] = None; st.rerun()
                         if st.button("⚖️ Comparar com Principal", key=f"cmp_{rid}", use_container_width=True):
                             state["open_compare"] = rid if not is_comparing else None; st.rerun()
                     if not is_principal and is_comparing:
                         st.markdown("---")
                         cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
                         if cancel_checked != is_marked_for_cancel:
-                            action = "mark_cancel" if cancel_checked else "unmark_cancel"; log_action_to_firestore(db_firestore, user, action, {"group_id": group_id, "principal_id": state["principal_id"], "target_activity_id": rid})
+                            action = "mark_cancel" if cancel_checked else "unmark_cancel"
+                            log_details_row.update({"principal_id": state["principal_id"], "target_activity_id": rid})
+                            log_action_to_firestore(db_firestore, user, action, log_details_row)
                             if cancel_checked: state["cancelados"].add(rid)
                             else: state["cancelados"].discard(rid)
                             st.rerun()
@@ -626,7 +646,6 @@ def get_firestore_history(_db, limit=100):
     try: return [doc.to_dict() for doc in _db.collection("duplicidade_actions").order_by("ts", direction=firestore.Query.DESCENDING).limit(limit).stream()]
     except Exception as e: st.error(f"Erro ao buscar histórico do Firestore: {e}"); return []
 
-# ALTERAÇÃO: Nova função para formatar o histórico para uma tabela amigável
 def format_history_for_display(history: List[Dict]) -> pd.DataFrame:
     """Transforma a lista de logs do Firestore em um DataFrame legível."""
     if not history:
@@ -638,19 +657,13 @@ def format_history_for_display(history: List[Dict]) -> pd.DataFrame:
         ts_local = ts.astimezone(TZ_SP) if isinstance(ts, datetime) else "N/A"
         details = log.get("details", {})
         
-        # Mapeia a ação para uma descrição mais clara
         action_map = {
-            "set_principal": "Definição de Principal",
-            "mark_all_cancel": "Marcar Todos para Cancelar",
-            "mark_not_duplicate": "Marcar Grupo como 'Não Duplicado'",
-            "mark_cancel": "Marcar para Cancelar",
-            "unmark_cancel": "Desmarcar para Cancelar",
-            "process_cancellation_success": "Cancelamento via API (Sucesso)",
-            "process_cancellation_failure": "Cancelamento via API (Falha)",
-            "process_cancellation_exception": "Cancelamento via API (Erro)",
+            "set_principal": "Definição de Principal", "mark_all_cancel": "Marcar Todos para Cancelar",
+            "mark_not_duplicate": "Marcar Grupo como 'Não Duplicado'", "mark_cancel": "Marcar para Cancelar",
+            "unmark_cancel": "Desmarcar para Cancelar", "process_cancellation_success": "Cancelamento via API (Sucesso)",
+            "process_cancellation_failure": "Cancelamento via API (Falha)", "process_cancellation_exception": "Cancelamento via API (Erro)",
         }
         
-        # Monta uma descrição detalhada baseada no tipo de ação
         description = ""
         if log.get("action") == "set_principal":
             description = f"ID {details.get('new_principal_id')} definido como principal, substituindo {details.get('previous_principal_id')}."
@@ -663,19 +676,18 @@ def format_history_for_display(history: List[Dict]) -> pd.DataFrame:
         elif log.get("action") == "mark_not_duplicate":
             description = f"Grupo iniciado por {details.get('group_id')} foi marcado como 'Não é Duplicado'."
         else:
-            description = json.dumps(details, ensure_ascii=False, indent=2)
-
+            description = json.dumps(details, ensure_ascii=False)
 
         parsed_logs.append({
             "Data": ts_local.strftime('%d/%m/%Y %H:%M:%S') if ts_local != "N/A" else "N/A",
             "Usuário": log.get("user", "N/A"),
             "Ação": action_map.get(log.get("action"), log.get("action", "N/A")),
+            "Pasta": details.get("pasta", details.get("Pasta", "N/A")), # Pega a pasta
             "Detalhes": description,
         })
         
     return pd.DataFrame(parsed_logs)
 
-# ALTERAÇÃO: Função de renderização do histórico foi reescrita
 def render_history_tab(db_firestore):
     """Renderiza a aba de histórico com múltiplas visões e opções de exportação."""
     st.subheader("📜 Histórico de Ações (Auditoria)")
@@ -710,7 +722,6 @@ def render_history_tab(db_firestore):
     with raw_tab:
         st.write("Os dados completos como estão armazenados no banco de dados. Útil para depuração.")
         
-        # Função para converter datetime para string no JSON
         def json_converter(o):
             if isinstance(o, datetime):
                 return o.isoformat()
@@ -761,6 +772,7 @@ def main():
         st.session_state[SK.GROUP_STATES] = {}
         st.session_state.last_group_id = current_first_group_id
 
+    # Aplica filtros de exibição
     filtered_groups = all_groups
     if params["pastas"]:
         filtered_groups = [g for g in filtered_groups if g[0].get("activity_folder") in params["pastas"]]
@@ -769,6 +781,30 @@ def main():
     if params["only_groups_with_open"]:
         filtered_groups = [g for g in filtered_groups if any(r.get("activity_status") == "Aberta" for r in g)]
     
+    # ALTERAÇÃO: Lógica do Modo Estrito movida para a filtragem principal
+    if params["strict_only"]:
+        strictly_filtered_groups = []
+        for group in filtered_groups:
+            principal_id = get_best_principal_id(group, params['min_sim'] * 100, params['min_containment'])
+            principal = next((r for r in group if r["activity_id"] == principal_id), group[0])
+            p_norm = normalize_for_match(principal.get("Texto", ""), [])
+            p_meta = extract_meta(principal.get("Texto", ""))
+            
+            visible_rows = [principal]
+            for row in group:
+                if row["activity_id"] == principal_id: continue
+                r_norm = normalize_for_match(row.get("Texto", ""), [])
+                r_meta = extract_meta(row.get("Texto", ""))
+                score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+                if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
+                    visible_rows.append(row)
+            
+            # Apenas adiciona o grupo se houver mais de um item após a filtragem estrita
+            if len(visible_rows) > 1:
+                # Passa o grupo original para render_group, que irá re-filtrar para exibição
+                strictly_filtered_groups.append(group)
+        filtered_groups = strictly_filtered_groups
+
     filtered_groups = [g for g in filtered_groups if g[0]['activity_id'] not in st.session_state[SK.IGNORED_GROUPS]]
 
     tab1, tab2, tab3 = st.tabs(["🔎 Análise de Duplicidades", "📊 Calibração", "📜 Histórico de Ações"])
@@ -782,6 +818,7 @@ def main():
         st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(filtered_groups))} de {len(filtered_groups)}")
 
         for group in filtered_groups[start_idx:end_idx]:
+            # A função render_group agora recebe o grupo original e aplicará a lógica de exibição internamente
             render_group(group, params, db_firestore)
 
         st.markdown("---"); st.header("⚡ Ações em Massa")
