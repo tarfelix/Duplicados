@@ -9,6 +9,10 @@ a seleção do item principal, evitando que atividades canceladas sejam
 sugeridas como principais.
 
 Principais Correções e Melhorias:
+- Similaridade Padrão Ajustada: O valor padrão da similaridade global foi
+  aumentado para 95%.
+- Histórico Aprimorado: A aba de histórico agora tem uma visão em tabela
+  amigável e opções de exportação para CSV e JSON.
 - Lógica do Principal Corrigida: A função `get_best_principal_id` agora
   ignora atividades com status 'Cancelado' ao eleger o principal.
 - Otimização do Cache: O cálculo pesado de similaridade é executado
@@ -27,6 +31,7 @@ import html
 import logging
 import time
 import math
+import json
 from datetime import datetime, timedelta, date
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional
@@ -71,7 +76,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v6_final_corrigido"
+SUFFIX = "_v7_final_hist"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
@@ -84,7 +89,7 @@ DEFAULTS = {
     "itens_por_pagina": 10,
     "dias_filtro_inicio": 7,
     "dias_filtro_fim": 14,
-    "min_sim_global": 90,
+    "min_sim_global": 95, # ALTERAÇÃO: Aumentado para 95%
     "min_containment": 55,
     "pre_cutoff_delta": 10,
     "diff_hard_limit": 12000,
@@ -621,17 +626,105 @@ def get_firestore_history(_db, limit=100):
     try: return [doc.to_dict() for doc in _db.collection("duplicidade_actions").order_by("ts", direction=firestore.Query.DESCENDING).limit(limit).stream()]
     except Exception as e: st.error(f"Erro ao buscar histórico do Firestore: {e}"); return []
 
-def render_history_tab(db_firestore):
-    st.subheader("📜 Histórico de Ações (Auditoria)");
-    if db_firestore is None: st.warning("A conexão com o Firebase (auditoria) não está ativa."); return
-    if st.button("Atualizar Histórico"): get_firestore_history.clear()
-    history = get_firestore_history(db_firestore)
-    if not history: st.info("Nenhum registro de auditoria encontrado."); return
+# ALTERAÇÃO: Nova função para formatar o histórico para uma tabela amigável
+def format_history_for_display(history: List[Dict]) -> pd.DataFrame:
+    """Transforma a lista de logs do Firestore em um DataFrame legível."""
+    if not history:
+        return pd.DataFrame()
+
+    parsed_logs = []
     for log in history:
-        ts = log.get("ts"); ts_local = ts.astimezone(TZ_SP) if isinstance(ts, datetime) else None
-        timestamp_str = ts_local.strftime('%d/%m/%Y %H:%M:%S') if ts_local else "N/A"
-        user = log.get("user", "N/A"); action = log.get("action", "N/A").replace("_", " ").title()
-        with st.expander(f"**{action}** por **{user}** em {timestamp_str}"): st.json(log.get("details", {}))
+        ts = log.get("ts")
+        ts_local = ts.astimezone(TZ_SP) if isinstance(ts, datetime) else "N/A"
+        details = log.get("details", {})
+        
+        # Mapeia a ação para uma descrição mais clara
+        action_map = {
+            "set_principal": "Definição de Principal",
+            "mark_all_cancel": "Marcar Todos para Cancelar",
+            "mark_not_duplicate": "Marcar Grupo como 'Não Duplicado'",
+            "mark_cancel": "Marcar para Cancelar",
+            "unmark_cancel": "Desmarcar para Cancelar",
+            "process_cancellation_success": "Cancelamento via API (Sucesso)",
+            "process_cancellation_failure": "Cancelamento via API (Falha)",
+            "process_cancellation_exception": "Cancelamento via API (Erro)",
+        }
+        
+        # Monta uma descrição detalhada baseada no tipo de ação
+        description = ""
+        if log.get("action") == "set_principal":
+            description = f"ID {details.get('new_principal_id')} definido como principal, substituindo {details.get('previous_principal_id')}."
+        elif log.get("action") == "mark_cancel":
+            description = f"ID {details.get('target_activity_id')} marcado para ser cancelado (principal: {details.get('principal_id')})."
+        elif log.get("action") == "unmark_cancel":
+            description = f"ID {details.get('target_activity_id')} desmarcado (principal: {details.get('principal_id')})."
+        elif log.get("action") == "process_cancellation_success":
+            description = f"ID {details.get('ID a Cancelar')} cancelado com sucesso (duplicata de {details.get('Duplicata do Principal')})."
+        elif log.get("action") == "mark_not_duplicate":
+            description = f"Grupo iniciado por {details.get('group_id')} foi marcado como 'Não é Duplicado'."
+        else:
+            description = json.dumps(details, ensure_ascii=False, indent=2)
+
+
+        parsed_logs.append({
+            "Data": ts_local.strftime('%d/%m/%Y %H:%M:%S') if ts_local != "N/A" else "N/A",
+            "Usuário": log.get("user", "N/A"),
+            "Ação": action_map.get(log.get("action"), log.get("action", "N/A")),
+            "Detalhes": description,
+        })
+        
+    return pd.DataFrame(parsed_logs)
+
+# ALTERAÇÃO: Função de renderização do histórico foi reescrita
+def render_history_tab(db_firestore):
+    """Renderiza a aba de histórico com múltiplas visões e opções de exportação."""
+    st.subheader("📜 Histórico de Ações (Auditoria)")
+    if db_firestore is None:
+        st.warning("A conexão com o Firebase (auditoria) não está ativa.")
+        return
+
+    if st.button("Atualizar Histórico"):
+        get_firestore_history.clear()
+
+    history = get_firestore_history(db_firestore)
+    if not history:
+        st.info("Nenhum registro de auditoria encontrado.")
+        return
+
+    friendly_tab, raw_tab = st.tabs(["Visão Amigável (Tabela)", "Dados Brutos (JSON)"])
+
+    with friendly_tab:
+        st.write("Uma visão simplificada das ações realizadas, ideal para auditoria rápida.")
+        df_friendly = format_history_for_display(history)
+        
+        st.dataframe(df_friendly, use_container_width=True, hide_index=True)
+        
+        csv_data = df_friendly.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ Exportar para CSV",
+            data=csv_data,
+            file_name=f"historico_duplicidades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+
+    with raw_tab:
+        st.write("Os dados completos como estão armazenados no banco de dados. Útil para depuração.")
+        
+        # Função para converter datetime para string no JSON
+        def json_converter(o):
+            if isinstance(o, datetime):
+                return o.isoformat()
+        
+        json_data = json.dumps(history, default=json_converter, indent=2, ensure_ascii=False)
+        st.download_button(
+            label="⬇️ Exportar para JSON",
+            data=json_data,
+            file_name=f"historico_duplicidades_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+        )
+        
+        st.json(history)
+
 
 # =============================================================================
 # FLUXO PRINCIPAL DO APLICATIVO
