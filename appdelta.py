@@ -317,24 +317,6 @@ def extract_meta(text: str) -> Dict[str, str]:
             
     return meta
 
-def normalize_for_match(text: str, stopwords_extra: List[str] | tuple) -> str:
-    """Aplica uma série de normalizações ao texto para melhorar a comparação."""
-    if not isinstance(text, str):
-    pass
-
-return ""
-    t = text
-    t = URL_RE.sub(" url ", t)
-    t = CNJ_RE.sub(" numproc ", t)
-    t = DATENUM_RE.sub(" data ", t)
-    t = NUM_RE.sub(" # ", t)
-    t = unidecode(t.lower())
-    t = re.sub(r"[^\w\s]", " ", t)
-    
-    all_stopwords = STOPWORDS_BASE.union(stopwords_extra)
-    tokens = [w for w in t.split() if w not in all_stopwords]
-    return " ".join(tokens)
-
 def token_containment(a_tokens: List[str], b_tokens: List[str]) -> float:
     """Calcula a porcentagem de tokens do texto menor que estão contidos no texto maior."""
     if not a_tokens or not b_tokens: return 0.0
@@ -1099,3 +1081,27 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=100_000)
+def _normalize_for_match_cached(text: str, stopwords_extra_tuple: tuple) -> str:
+    import re
+    t = (text or "").lower()
+    # basic normalization (remove non-word chars, collapse spaces)
+    t = re.sub(r"[^\w\s]", " ", t)
+    if stopwords_extra_tuple:
+        for s in stopwords_extra_tuple:
+            t = t.replace(s.lower(), " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def normalize_for_match(text: str, stopwords_extra) -> str:
+    if not isinstance(stopwords_extra, tuple):
+        try:
+            stopwords_extra = tuple(stopwords_extra)
+        except Exception:
+            stopwords_extra = tuple()
+    return _normalize_for_match_cached(text, stopwords_extra)
+
