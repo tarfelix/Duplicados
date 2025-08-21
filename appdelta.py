@@ -1,338 +1,848 @@
 # -*- coding: utf-8 -*-
 """
-Ferramenta de Apoio à Distribuição de Atividades 'Verificar'
-===================================================================
+Verificador de Duplicidade — Versão Otimizada e Corrigida
+=========================================================
 
-Este aplicativo foi redesenhado para focar na distribuição inteligente
-de atividades do tipo 'Verificar'. O objetivo principal é fornecer contexto
-histórico para cada atividade que está atualmente em aberto.
+Este aplicativo combina as funcionalidades avançadas da versão 'appdelta'
+com as otimizações de performance e a lógica de negócio corrigida para
+a seleção do item principal e exibição de grupos.
 
-Funcionalidades Principais:
-- Login de Usuário: Acesso seguro utilizando credenciais armazenadas no
-  Streamlit secrets.
-- Visão Focada: Lista todas as atividades com status 'Aberta' ou 'Aguardando'.
-- Ordenação Inteligente: Ordena as atividades por responsável e depois por pasta.
-- Destaque Visual Preciso: Usa cores de fundo e texto informativo para
-  diferenciar alertas de duplicidade e consistência.
-- Contexto Histórico: Para cada atividade aberta, exibe todas as outras
-  atividades da mesma pasta dentro do período de tempo selecionado.
-- Filtros Inteligentes: Os filtros de responsável, pasta e texto se aplicam
-  apenas às atividades ativas.
+Principais Correções e Melhorias:
+- Lógica de Filtro Corrigida: O filtro "Apenas grupos com atividades abertas"
+  agora funciona corretamente e tem prioridade sobre a seleção de status.
+- Ordem de Exibição Corrigida: O item "Principal" agora é sempre o primeiro
+  a ser exibido dentro de um grupo.
+- Estilo Visual Aprimorado: As cores para os status "Principal" e "Cancelado"
+  estão mais vivas e destacadas.
+- Lógica do Modo Estrito Aprimorada: Garante que apenas itens que atendam
+  diretamente ao critério de similaridade com o principal sejam exibidos.
+- Similaridade Padrão Ajustada: O valor padrão da similaridade global foi
+  reforçado para 95% na interface.
+- Histórico Aprimorado: A aba de histórico agora exibe a Pasta da atividade
+  e mantém as opções de exportação para CSV e JSON.
 """
+from __future__ import annotations
 
-import streamlit as st
+import os
+import re
+import html
+import logging
+import time
+import math
+import json
+from datetime import datetime, timedelta, date
+from collections import defaultdict, deque
+from typing import Dict, List, Tuple, Optional
+
 import pandas as pd
+import numpy as np
+import streamlit as st
 from sqlalchemy import create_engine, text, exc
 from sqlalchemy.engine import Engine
-from datetime import datetime, timedelta
-from typing import Optional
-import streamlit.components.v1 as components
+from zoneinfo import ZoneInfo
+from unidecode import unidecode
+from rapidfuzz import fuzz, process
+from difflib import SequenceMatcher
 
-# --- Chave de Sessão para Login ---
-USERNAME_KEY = "username_distro_app"
+# Importa o cliente de API.
+try:
+    from api_functions_retry import HttpClientRetry
+except ImportError:
+    st.error("Erro: O arquivo 'api_functions_retry.py' não foi encontrado.")
+    HttpClientRetry = None
 
-# --- Configuração Geral da Página ---
-st.set_page_config(
-    layout="wide",
-    page_title="Apoio à Distribuição de 'Verificar'"
-)
+# Opcional para o gráfico de calibração
+try:
+    import altair as alt
+except ImportError:
+    alt = None
 
-# --- CSS Customizado para Cores de Fundo e Layout Compacto ---
+# Importações do Firebase para auditoria
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+except ImportError:
+    st.warning("Aviso: A biblioteca 'firebase-admin' não foi encontrada. O log de auditoria será desativado.")
+    firebase_admin = None
+
+
+# =============================================================================
+# CONFIGURAÇÃO GERAL E CONSTANTES
+# =============================================================================
+APP_TITLE = "Verificador de Duplicidade Avançado"
+TZ_SP = ZoneInfo("America/Sao_Paulo")
+TZ_UTC = ZoneInfo("UTC")
+
+# Chaves para o session_state do Streamlit
+SUFFIX = "_v11_final_bugfix"
+class SK:
+    USERNAME = f"username_{SUFFIX}"
+    SIMILARITY_CACHE = f"simcache_{SUFFIX}"
+    GROUP_STATES = f"group_states_{SUFFIX}"
+    CFG = f"cfg_{SUFFIX}"
+    SHOW_CANCEL_CONFIRM = f"show_cancel_confirm_{SUFFIX}"
+    IGNORED_GROUPS = f"ignored_groups_{SUFFIX}"
+
+DEFAULTS = {
+    "itens_por_pagina": 10,
+    "dias_filtro_inicio": 7,
+    "dias_filtro_fim": 14,
+    "min_sim_global": 95,
+    "min_containment": 55,
+    "pre_cutoff_delta": 10,
+    "diff_hard_limit": 12000,
+}
+
+# Configuração da página e estilos CSS
+st.set_page_config(layout="wide", page_title=APP_TITLE)
 st.markdown("""
 <style>
-    /* O marcador em si é invisível, serve apenas para o script encontrar. */
-    .activity-item-marker {
-        display: none;
+    pre.highlighted-text {
+        white-space: pre-wrap; word-wrap: break-word; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+        font-size: .9em; padding: 10px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9; height: 360px; overflow-y: auto;
     }
-
-    /* Adiciona um espaço abaixo de cada expander para separá-los. */
-    div[data-testid="stExpander"] {
-        margin-bottom: 8px !important;
-    }
-
-    /* --- Classes de Cor que serão aplicadas pelo JavaScript --- */
-    .alert-red-header {
-        background-color: #ffcdd2 !important;
-    }
-
-    .alert-black-header {
-        background-color: #BDBDBD !important;
-    }
-    .alert-black-header p { /* Garante que o texto seja branco no fundo escuro */
-        color: white !important;
-    }
-
-    .alert-gray-header {
-        background-color: #f5f5f5 !important;
-    }
-
-    /* --- Estilos da Legenda (sem alterações) --- */
-    .legenda { display: flex; align-items: center; margin-bottom: 1rem; }
-    .cor-box { width: 20px; height: 20px; margin-right: 10px; border: 1px solid #ccc; }
-    .vermelho { background-color: #ffcdd2; }
-    .preto { background-color: #BDBDBD; }
-    .cinza { background-color: #f5f5f5; }
+    .diff-del { background-color: #ffcdd2 !important; text-decoration: none !important; }
+    .diff-ins { background-color: #c8e6c9 !important; text-decoration: none !important; }
+    .card { border-left: 5px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; background-color: #fff; }
+    .card-cancelado { background-color: #FFEBEE; border-left: 5px solid #F44336; }
+    .card-principal { background-color: #E8F5E9; border-left: 5px solid #4CAF50; }
+    .similarity-badge { padding: 3px 6px; border-radius: 5px; color: black; font-weight: 600; display: inline-block; margin-bottom: 6px; }
+    .badge-green { background:#C8E6C9; } .badge-yellow { background:#FFF9C4; } .badge-red { background:#FFCDD2; }
+    .meta-chip { background:#E0F7FA; padding:2px 6px; margin-right:6px; border-radius:8px; display:inline-block; font-size:0.85em; }
+    .small-muted { color:#777; font-size:0.85em; }
 </style>
 """, unsafe_allow_html=True)
 
+# =============================================================================
+# INICIALIZAÇÃO DE SERVIÇOS
+# =============================================================================
 
-st.title("Apoio à Distribuição de Atividades 'Verificar'")
-
-# --- Conexão com o Banco de Dados ---
 @st.cache_resource
 def db_engine_mysql() -> Optional[Engine]:
-    """
-    Cria e gerencia a conexão com o banco de dados MySQL usando SQLAlchemy.
-    """
+    cfg = st.secrets.get("database", {})
+    db_params = {k: cfg.get(k) for k in ["host", "user", "password", "name"]}
+    if not all(db_params.values()):
+        st.error("Credenciais do banco de dados (MySQL) ausentes.")
+        st.stop()
     try:
-        cfg = st.secrets.get("database", {})
-        db_user, db_password, db_host, db_name = cfg.get("user"), cfg.get("password"), cfg.get("host"), cfg.get("name")
-        if not all([db_user, db_password, db_host, db_name]):
-            st.error("As credenciais do banco de dados (MySQL) não foram configuradas nos segredos.")
-            return None
-        connection_url = f"mysql+mysqlconnector://{db_user}:{db_password}@{db_host}/{db_name}"
-        engine = create_engine(connection_url, pool_pre_ping=True, pool_recycle=3600)
+        engine = create_engine(
+            f"mysql+mysqlconnector://{db_params['user']}:{db_params['password']}@{db_params['host']}/{db_params['name']}",
+            pool_pre_ping=True, pool_recycle=3600
+        )
         with engine.connect(): pass
         return engine
     except exc.SQLAlchemyError as e:
-        st.error(f"Ocorreu um erro ao conectar ao banco de dados (MySQL): {e}")
+        logging.exception(e); st.error(f"Erro ao conectar no banco (MySQL): {e}"); st.stop()
+
+@st.cache_resource
+def api_client() -> Optional[HttpClientRetry]:
+    if HttpClientRetry is None: return None
+    api_cfg = st.secrets.get("api", {})
+    client_cfg = st.secrets.get("api_client", {})
+    api_params = {k: api_cfg.get(k) for k in ["url_api", "entity_id", "token"]}
+    if not all(api_params.values()):
+        st.warning("Configuração da API ausente. Cancelamento desativado.")
         return None
+    return HttpClientRetry(
+        base_url=api_params["url_api"], entity_id=api_params["entity_id"], token=api_params["token"],
+        calls_per_second=float(client_cfg.get("calls_per_second", 3.0)), max_attempts=int(client_cfg.get("max_attempts", 3)),
+        timeout=int(client_cfg.get("timeout", 15)), dry_run=bool(client_cfg.get("dry_run", False))
+    )
 
-# --- Carregamento de Dados ---
-@st.cache_data(ttl=300) # Cache de 5 minutos
-def carregar_dados_contextuais(_eng: Engine, data_inicio: datetime.date, data_fim: datetime.date) -> pd.DataFrame:
-    """
-    Carrega dados de forma contextual, incluindo status 'Aguardando'.
-    """
-    if _eng is None: return pd.DataFrame()
-    start_datetime = datetime.combine(data_inicio, datetime.min.time())
-    end_datetime = datetime.combine(data_fim, datetime.max.time())
-    
-    active_statuses = ('Aberta', 'Aguardando')
+@st.cache_resource
+def init_firebase():
+    if not firebase_admin: return None
+    try:
+        if not firebase_admin._apps:
+            creds_config = st.secrets.get("firebase_credentials")
+            if not creds_config: st.warning("Credenciais do Firebase não encontradas."); return None
+            creds_dict = dict(creds_config)
+            creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+            cred = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        st.sidebar.success("Auditoria (Firebase) conectada. ✅")
+        return db
+    except Exception as e:
+        st.sidebar.error(f"Falha ao conectar no Firebase: {e}."); return None
 
-    query = text(f"""
-        WITH PastasAtivas AS (
-            SELECT DISTINCT activity_folder
-            FROM ViewGrdAtividadesTarcisio
-            WHERE activity_type = 'Verificar' AND activity_status IN {active_statuses}
-        )
-        SELECT 
-            v.activity_id, v.activity_folder, v.user_profile_name, 
-            v.activity_date, v.activity_status, v.Texto
-        FROM ViewGrdAtividadesTarcisio v
-        JOIN PastasAtivas p ON v.activity_folder = p.activity_folder
-        WHERE 
-            v.activity_type = 'Verificar' 
-            AND (
-                v.activity_status IN {active_statuses} OR
-                v.activity_date BETWEEN :start_datetime AND :end_datetime
-            )
+def log_action_to_firestore(db, user: str, action: str, details: Dict):
+    if db is None: return
+    try:
+        doc_ref = db.collection("duplicidade_actions").document()
+        log_entry = {"ts": firestore.SERVER_TIMESTAMP, "user": user, "action": action, "details": details}
+        doc_ref.set(log_entry)
+    except Exception as e:
+        logging.error(f"Erro ao registrar ação no Firestore: {e}")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
+
+
+# =============================================================================
+# CARREGAMENTO E PRÉ-PROCESSAMENTO DE DADOS
+# =============================================================================
+
+@st.cache_data(ttl=1800, hash_funcs={Engine: lambda _: None})
+def carregar_dados_mysql(_eng: Engine, dias_historico: int) -> pd.DataFrame:
+    """
+    Carrega dados do banco.
+    Nota sobre performance: A lentidão inicial pode vir da complexidade da
+    ViewGrdAtividadesTarcisio no banco. Garantir que as colunas `activity_type`
+    e `activity_date` estejam indexadas na tabela original pode acelerar a consulta.
+    """
+    limite = date.today() - timedelta(days=dias_historico)
+    query = text("""
+        SELECT activity_id, activity_folder, user_profile_name, activity_date, activity_status, Texto
+        FROM ViewGrdAtividadesTarcisio
+        WHERE activity_type='Verificar' AND (activity_status='Aberta' OR DATE(activity_date) >= :limite)
     """)
     try:
         with _eng.connect() as conn:
-            df = pd.read_sql(query, conn, params={"start_datetime": start_datetime, "end_datetime": end_datetime})
-        if not df.empty:
-            df["activity_id"] = df["activity_id"].astype(str)
-            df["activity_date"] = pd.to_datetime(df["activity_date"], errors='coerce')
-            df["Texto"] = df["Texto"].fillna("").astype(str)
-        return df.sort_values("activity_date", ascending=False)
+            df = pd.read_sql(query, conn, params={"limite": limite})
+        if df.empty: return pd.DataFrame()
+        df["activity_id"] = df["activity_id"].astype(str)
+        df["activity_date"] = pd.to_datetime(df["activity_date"], errors="coerce")
+        df["Texto"] = df["Texto"].fillna("").astype(str)
+        df["status_ord"] = df["activity_status"].map({"Aberta": 0}).fillna(1)
+        df = df.sort_values(["activity_id", "status_ord"]).drop_duplicates("activity_id", keep="first").drop(columns="status_ord")
+        return df.sort_values(["activity_folder", "activity_date"], ascending=[True, False])
     except exc.SQLAlchemyError as e:
-        st.error(f"Erro ao executar a consulta no banco de dados: {e}")
-        return pd.DataFrame()
+        logging.exception(e); st.error(f"Erro ao carregar dados do banco: {e}"); return pd.DataFrame()
 
-# --- Interface Principal ---
-def main():
-    if USERNAME_KEY not in st.session_state:
-        st.session_state[USERNAME_KEY] = None
+# =============================================================================
+# LÓGICA DE SIMILARIDADE E FUNÇÕES AUXILIARES
+# =============================================================================
+CNJ_RE = re.compile(r"(?:\b|^)(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})(?:\b|$)")
+URL_RE = re.compile(r"https?://\S+")
+DATENUM_RE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
+NUM_RE = re.compile(r"\b\d+\b")
+STOPWORDS_BASE = set("de da do das dos e em a o os as na no para por com que ao aos às à um uma umas uns tipo titulo inteiro teor publicado publicacao disponibilizacao orgao vara tribunal processo recurso intimacao notificacao justica nacional diario djen poder judiciario trabalho".split())
 
-    if not st.session_state.get(USERNAME_KEY):
-        st.sidebar.header("🔐 Login")
-        with st.sidebar.form("login_form"):
-            username = st.text_input("Nome de Usuário")
-            password = st.text_input("Senha", type="password")
-            submitted = st.form_submit_button("Entrar")
-            if submitted:
-                creds = st.secrets.get("credentials", {})
-                user_creds = creds.get("usernames", {})
-                if username in user_creds and user_creds[username] == password:
-                    st.session_state[USERNAME_KEY] = username
-                    st.rerun()
-                else:
-                    st.sidebar.error("Usuário ou senha inválidos.")
-        st.info("👋 Bem-vindo! Por favor, faça o login na barra lateral para continuar.")
-        st.stop()
-
-    st.sidebar.success(f"Logado como: **{st.session_state[USERNAME_KEY]}**")
-    st.sidebar.header("🔍 Filtros da Consulta")
-
-    data_fim_padrao = datetime.now().date()
-    data_inicio_padrao = data_fim_padrao - timedelta(days=10)
-    
-    st.sidebar.info("O filtro de data define o período para buscar o **histórico de contexto** das atividades.")
-    data_inicio = st.sidebar.date_input("📅 Início do Histórico", value=data_inicio_padrao)
-    data_fim = st.sidebar.date_input("📅 Fim do Histórico", value=data_fim_padrao)
-
-    if data_inicio > data_fim:
-        st.sidebar.error("A data de início não pode ser posterior à data de fim.")
-        st.stop()
-
-    if st.sidebar.button("🔄 Recarregar Dados", use_container_width=True):
-        st.cache_data.clear()
-        st.success("Cache limpo! Os dados serão recarregados.")
-        st.rerun()
-
-    engine = db_engine_mysql()
-    if engine is None: st.stop()
-    
-    with st.spinner("Carregando dados das atividades... Por favor, aguarde."):
-        df_contexto_total = carregar_dados_contextuais(engine, data_inicio, data_fim)
-
-    if df_contexto_total.empty:
-        st.info("Nenhuma atividade 'Aberta' ou 'Aguardando' foi encontrada, ou não há histórico para elas no período selecionado.")
-        st.stop()
-
-    active_statuses = ['Aberta', 'Aguardando']
-    df_ativas = df_contexto_total[df_contexto_total['activity_status'].isin(active_statuses)].copy()
-    
-    st.sidebar.markdown("---")
-    st.sidebar.header("🔎 Filtrar Atividades Ativas")
-
-    lista_pastas = sorted(df_ativas['activity_folder'].dropna().unique().tolist())
-    pastas_selecionadas = st.sidebar.multiselect("📁 Pastas", options=lista_pastas)
-
-    lista_responsaveis = sorted(df_ativas['user_profile_name'].dropna().unique().tolist())
-    usuarios_selecionados = st.sidebar.multiselect("👤 Responsáveis", options=lista_responsaveis)
-    
-    texto_busca = st.sidebar.text_input("📝 Buscar no Texto")
-
-    df_ativas_filtrado = df_ativas
-    if pastas_selecionadas:
-        df_ativas_filtrado = df_ativas_filtrado[df_ativas_filtrado['activity_folder'].isin(pastas_selecionadas)]
-    if usuarios_selecionados:
-        df_ativas_filtrado = df_ativas_filtrado[df_ativas_filtrado['user_profile_name'].isin(usuarios_selecionados)]
-    if texto_busca:
-        df_ativas_filtrado = df_ativas_filtrado[df_ativas_filtrado['Texto'].str.contains(texto_busca, case=False, na=False)]
-
-    if not df_ativas_filtrado.empty:
-        df_ativas_filtrado = df_ativas_filtrado.sort_values(
-            by=['user_profile_name', 'activity_folder', 'activity_date'], 
-            ascending=[True, True, False]
-        )
-
-    st.metric("Total de Atividades Ativas (após filtros)", len(df_ativas_filtrado))
-    
-    st.markdown("""
-        <div class="legenda">
-            <div class="cor-box vermelho"></div><span><b>Alerta Crítico (Vermelho):</b> A mesma pessoa tem mais de uma atividade ativa na mesma pasta.</span>
-        </div>
-        <div class="legenda">
-            <div class="cor-box preto"></div><span><b>Alerta de Consistência (Preto):</b> Pessoas diferentes têm atividades ativas na mesma pasta.</span>
-        </div>
-        <div class="legenda">
-            <div class="cor-box cinza"></div><span><b>Normal (Cinza):</b> Apenas uma atividade ativa nesta pasta.</span>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.caption(f"Exibindo atividades ativas ('Aberta' ou 'Aguardando') e seu histórico de contexto.")
-    st.markdown("---")
-
-    for _, atividade_atual in df_ativas_filtrado.iterrows():
-        conflitos_df = df_ativas[
-            (df_ativas['activity_folder'] == atividade_atual['activity_folder']) &
-            (df_ativas['activity_id'] != atividade_atual['activity_id'])
-        ]
-
-        classe_css = 'alert-gray'
-        info_conflito = ""
-        
-        if not conflitos_df.empty:
-            conflito_mesmo_resp = conflitos_df[conflitos_df['user_profile_name'] == atividade_atual['user_profile_name']]
-            if not conflito_mesmo_resp.empty:
-                classe_css = 'alert-red'
-                outro = conflito_mesmo_resp.iloc[0]
-                info_conflito = f" (Conflito com ID {outro['activity_id']} | Status: {outro['activity_status']})"
-            else:
-                classe_css = 'alert-black'
-                outro = conflitos_df.iloc[0]
-                info_conflito = f" (Conflito com ID {outro['activity_id']} | Resp: {outro['user_profile_name']})"
-
-        expander_title = (
-            f"ID: {atividade_atual['activity_id']} | Pasta: {atividade_atual['activity_folder']} | "
-            f"Responsável: {atividade_atual['user_profile_name']} | Status: {atividade_atual['activity_status']}{info_conflito}"
-        )
-        
-        # Colocamos o marcador invisível...
-        st.markdown(f'<div class="activity-item-marker {classe_css}"></div>', unsafe_allow_html=True)
-        
-        # ...e o expander logo em seguida.
-        with st.expander(expander_title, expanded=False):
-            st.text_area("Conteúdo", atividade_atual['Texto'], key=f"texto_{atividade_atual['activity_id']}", height=150, disabled=True)
-            st.subheader(f"Histórico da Pasta '{atividade_atual['activity_folder']}' no Período")
-            df_historico_pasta = df_contexto_total[df_contexto_total['activity_folder'] == atividade_atual['activity_folder']]
-            st.dataframe(df_historico_pasta, use_container_width=True, hide_index=True,
-                column_config={
-                    "activity_id": "ID", "activity_folder": None, "user_profile_name": "Responsável",
-                    "activity_date": st.column_config.DatetimeColumn("Data", format="DD/MM/YYYY HH:mm"),
-                    "activity_status": "Status", "Texto": None
-                })
-
-    # --- SCRIPT INJECTION ---
-    # REVISÃO 10: Solução final, estável e segura.
-    # Este script espera a renderização do Streamlit terminar e aplica as cores uma única vez.
-    js_script = """
-    <script>
-    const applyColors = () => {
-        const markers = document.querySelectorAll('.activity-item-marker');
-        const expanderHeaders = document.querySelectorAll('[data-testid="stExpander"] > div:first-child');
-
-        if (markers.length === 0 || expanderHeaders.length === 0 || markers.length !== expanderHeaders.length) {
-            return false; // Indica que não foi bem-sucedido
-        }
-
-        markers.forEach((marker, index) => {
-            const header = expanderHeaders[index];
-            if (!header) return;
-
-            header.classList.remove('alert-red-header', 'alert-black-header', 'alert-gray-header');
-
-            let colorClass = '';
-            if (marker.classList.contains('alert-red')) {
-                colorClass = 'alert-red-header';
-            } else if (marker.classList.contains('alert-black')) {
-                colorClass = 'alert-black-header';
-            } else if (marker.classList.contains('alert-gray')) {
-                colorClass = 'alert-gray-header';
-            }
-            
-            if (colorClass) {
-                header.classList.add(colorClass);
-            }
-        });
-        return true; // Indica que foi bem-sucedido
+def get_zflow_links(activity_id: str | int) -> dict:
+    """Gera os links para as plataformas ZFlow v1 e v2."""
+    return {
+        "v1": f"https://zflow.zionbyonset.com.br/activity/3/details/{activity_id}",
+        "v2": f"https://zflowv2.zionbyonset.com.br/public/versatile_frame.php/?moduloid=2&activityid={activity_id}#/fixcol1"
     }
 
-    // A abordagem mais segura: um verificador que tenta aplicar as cores
-    // e para assim que consegue, evitando sobrecarga.
-    const runWhenReady = () => {
-        const intervalId = setInterval(() => {
-            // Tenta aplicar as cores. Se for bem-sucedido, a função retorna true.
-            if (applyColors()) {
-                // Para o verificador assim que as cores forem aplicadas.
-                clearInterval(intervalId);
-            }
-        }, 250); // Tenta a cada 250ms
+def extract_meta(text: str) -> Dict[str, str]:
+    t = text or ""; meta = {}
+    cnj_match = CNJ_RE.search(t)
+    cnj = cnj_match.group(1) if cnj_match else None
+    if not cnj:
+        proc_match = re.search(r"PROCESSO:\s*([0-9\-.]+)", t, re.IGNORECASE)
+        if proc_match: cnj = proc_match.group(1)
+    meta["processo"] = cnj or ""
+    patterns = {
+        "orgao": r"\bORGAO:\s*([^-\n\r]+)", "vara": r"\bVARA\s+DO\s+TRABALHO\s+[^-\n\r]+",
+        "tipo_doc": r"\bTIPO\s+DE\s+DOCUMENTO:\s*([^-]+)", "tipo_com": r"\bTIPO\s+DE\s+COMUNICACAO:\s*([^-]+)"
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, t, re.IGNORECASE)
+        if match: meta[key] = match.group(1).strip() if key != "vara" else match.group(0).strip()
+    return meta
 
-        // Como segurança, para o verificador após 5 segundos, independentemente do resultado.
-        setTimeout(() => {
-            clearInterval(intervalId);
-        }, 5000);
-    };
+def normalize_for_match(text: str, stopwords_extra: List[str]) -> str:
+    if not isinstance(text, str): return ""
+    t = URL_RE.sub(" url ", text); t = CNJ_RE.sub(" numproc ", t); t = DATENUM_RE.sub(" data ", t)
+    t = NUM_RE.sub(" # ", t); t = unidecode(t.lower()); t = re.sub(r"[^\w\s]", " ", t)
+    all_stopwords = STOPWORDS_BASE.union(stopwords_extra)
+    return " ".join([w for w in t.split() if w not in all_stopwords])
 
-    // Roda a função principal quando o iframe do Streamlit carregar.
-    window.addEventListener('load', runWhenReady);
-    </script>
+def token_containment(a_tokens: List[str], b_tokens: List[str]) -> float:
+    if not a_tokens or not b_tokens: return 0.0
+    small, big = (a_tokens, set(b_tokens)) if len(a_tokens) <= len(b_tokens) else (b_tokens, set(a_tokens))
+    return 100.0 * (sum(1 for token in small if token in big) / len(small))
+
+def length_penalty(len_a: int, len_b: int) -> float:
+    if len_a == 0 or len_b == 0: return 0.9
+    return max(0.9, 1.0 - (abs(len_a - len_b) / max(len_a, len_b)) * 0.1)
+
+def fields_bonus(meta_a: Dict[str,str], meta_b: Dict[str,str]) -> int:
+    bonus = 0
+    if meta_a.get("processo") and meta_a.get("processo") == meta_b.get("processo"): bonus += 6
+    if meta_a.get("orgao") and meta_a.get("orgao") == meta_b.get("orgao"): bonus += 3
+    if meta_a.get("tipo_doc") and meta_a.get("tipo_doc") == meta_b.get("tipo_doc"): bonus += 3
+    if meta_a.get("tipo_com") and meta_a.get("tipo_com") == meta_b.get("tipo_com"): bonus += 2
+    return bonus
+
+def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict[str,str]) -> Tuple[float, Dict[str,float]]:
+    set_ratio = fuzz.token_set_ratio(a_norm, b_norm); sort_ratio = fuzz.token_sort_ratio(a_norm, b_norm)
+    contain = token_containment(a_norm.split(), b_norm.split()); lp = length_penalty(len(a_norm), len(b_norm))
+    bonus = fields_bonus(meta_a, meta_b)
+    base_score = 0.6 * set_ratio + 0.2 * sort_ratio + 0.2 * contain
+    final_score = max(0.0, min(100.0, base_score * lp + bonus))
+    details = {"set": set_ratio, "sort": sort_ratio, "contain": contain, "len_pen": lp, "bonus": bonus, "base": base_score}
+    return final_score, details
+
+# =============================================================================
+# LÓGICA DE AGRUPAMENTO
+# =============================================================================
+
+def build_buckets(df: pd.DataFrame, use_cnj: bool) -> Dict[str, List[int]]:
+    buckets = defaultdict(list)
+    for i, row in df.iterrows():
+        folder = str(row.get("activity_folder") or "SEM_PASTA"); cnj = row.get("_meta", {}).get("processo", "")
+        key = f"folder::{folder}"
+        if use_cnj: key = f"{key}::cnj::{cnj or 'SEM_CNJ'}"
+        buckets[key].append(i)
+    return buckets
+
+@st.cache_data(ttl=3600)
+def criar_grupos_de_duplicatas(_df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
+    if _df.empty: return []
+
+    work_df = _df.copy()
+    stopwords_extra = st.secrets.get("similarity", {}).get("stopwords_extra", [])
+    work_df["_meta"] = work_df["Texto"].apply(extract_meta)
+    work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra))
+
+    buckets = build_buckets(work_df, params['use_cnj'])
+    cutoffs_map = st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {})
+
+    groups = []; memo_score: Dict[Tuple[int, int], Tuple[float, Dict]] = {}
+    
+    for bkey, idxs in buckets.items():
+        if len(idxs) < 2: continue
+        bucket_df = work_df.loc[idxs].reset_index().rename(columns={"index": "orig_idx"})
+        texts = bucket_df["_norm"].tolist()
+        folder_name = bkey.split("::")[1] if bkey.startswith("folder::") else None
+        min_sim_bucket = float(cutoffs_map.get(folder_name, params['min_sim']))
+        pre_cutoff = max(0, int(min_sim_bucket * 100) - params['pre_delta'])
+        
+        prelim_matrix = process.cdist(texts, texts, scorer=fuzz.token_set_ratio, score_cutoff=pre_cutoff)
+        
+        n = len(bucket_df); visited = set()
+        
+        def are_connected(i, j) -> bool:
+            key = tuple(sorted((i, j)))
+            if key in memo_score: score, details = memo_score[key]
+            else:
+                score, details = combined_score(bucket_df.loc[i, "_norm"], bucket_df.loc[j, "_norm"],
+                                                bucket_df.loc[i, "_meta"], bucket_df.loc[j, "_meta"])
+                memo_score[key] = (score, details)
+            return details["contain"] >= params['min_containment'] and score >= (min_sim_bucket * 100.0)
+
+        for i in range(n):
+            if i in visited: continue
+            component = {i}; queue = deque([i]); visited.add(i)
+            while queue:
+                current_node = queue.popleft()
+                for neighbor in range(n):
+                    if neighbor not in visited and prelim_matrix[current_node][neighbor] >= pre_cutoff and are_connected(current_node, neighbor):
+                        visited.add(neighbor); component.add(neighbor); queue.append(neighbor)
+            if len(component) > 1:
+                sorted_idxs = sorted(list(component), key=lambda ix: bucket_df.loc[ix, "activity_date"], reverse=True)
+                group_data = [work_df.loc[bucket_df.loc[ix, "orig_idx"]].to_dict() for ix in sorted_idxs]
+                groups.append(group_data)
+
+    return groups
+
+# =============================================================================
+# COMPONENTES DE UI E RENDERIZAÇÃO
+# =============================================================================
+
+def highlight_diffs_safe(text1: str, text2: str, hard_limit: int) -> Tuple[str,str]:
+    t1, t2 = (text1 or ""), (text2 or "")
+    if (len(t1) + len(t2)) > hard_limit:
+        s1 = " ".join(re.split(r'([.!?\n]+)', t1)[:100]); s2 = " ".join(re.split(r'([.!?\n]+)', t2)[:100])
+        h1, h2 = highlight_diffs(s1, s2)
+        note = "<div class='small-muted'>⚠️ Diff parcial. Comparando apenas o início.</div>"
+        return (note + h1, note + h2)
+    return highlight_diffs(t1, t2)
+
+def highlight_diffs(a: str, b: str) -> Tuple[str,str]:
+    tokens1 = [tok for tok in re.split(r'(\W+)', a or "") if tok]; tokens2 = [tok for tok in re.split(r'(\W+)', b or "") if tok]
+    sm = SequenceMatcher(None, tokens1, tokens2, autojunk=False); out1, out2 = [], []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        s1, s2 = html.escape("".join(tokens1[i1:i2])), html.escape("".join(tokens2[j1:j2]))
+        if tag == 'equal': out1.append(s1); out2.append(s2)
+        elif tag == 'replace': out1.append(f"<span class='diff-del'>{s1}</span>"); out2.append(f"<span class='diff-ins'>{s2}</span>")
+        elif tag == 'delete': out1.append(f"<span class='diff-del'>{s1}</span>")
+        elif tag == 'insert': out2.append(f"<span class='diff-ins'>{s2}</span>")
+    return (f"<pre class='highlighted-text'>{''.join(out1)}</pre>", f"<pre class='highlighted-text'>{''.join(out2)}</pre>")
+
+def sidebar_controls(df_full: pd.DataFrame) -> Dict:
+    st.sidebar.header("👤 Sessão"); username = st.session_state.get(SK.USERNAME, "Não logado")
+    st.sidebar.success(f"Logado como: **{username}**")
+    if st.sidebar.button("🔄 Forçar Atualização dos Dados"):
+        carregar_dados_mysql.clear(); criar_grupos_de_duplicatas.clear(); st.rerun()
+
+    st.sidebar.header("⚙️ Parâmetros de Similaridade")
+    sim_cfg = st.secrets.get("similarity", {})
+    min_sim_default = int(sim_cfg.get("min_sim_global", DEFAULTS["min_sim_global"]))
+    min_sim = st.sidebar.slider("Similaridade Mínima Global (%)", 0, 100, min_sim_default, 1) / 100.0
+    
+    min_containment = st.sidebar.slider("Containment Mínimo (%)", 0, 100, int(sim_cfg.get("min_containment", DEFAULTS["min_containment"])), 1)
+    pre_delta = st.sidebar.slider("Delta do Pré-corte", 0, 30, int(sim_cfg.get("pre_cutoff_delta", DEFAULTS["pre_cutoff_delta"])), 1)
+    diff_limit = st.sidebar.number_input("Limite de Caracteres do Diff", min_value=5000, value=int(sim_cfg.get("diff_hard_limit", DEFAULTS["diff_hard_limit"])), step=1000)
+
+    st.sidebar.header("👁️ Filtros de Exibição")
+    dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=10, step=1)
+    
+    pastas_opts = sorted(df_full["activity_folder"].dropna().unique()) if not df_full.empty else []
+    status_opts = sorted(df_full["activity_status"].dropna().unique()) if not df_full.empty else []
+    default_statuses = [s for s in status_opts if "Cancelad" not in s]
+    pastas_sel = st.sidebar.multiselect("Filtrar por Pastas", pastas_opts)
+    status_sel = st.sidebar.multiselect("Filtrar por Status", status_opts, default=default_statuses)
+    
+    only_groups_with_open = st.sidebar.toggle("Apenas grupos com atividades abertas", value=True)
+    strict_only = st.sidebar.toggle("Modo Estrito", value=True)
+
+    st.sidebar.header("🚀 Otimizações (Pré-índice)")
+    use_cnj = st.sidebar.toggle("Restringir por Nº do Processo (CNJ)", value=True)
+    
+    st.sidebar.header("📡 API de Cancelamento")
+    dry_run = st.sidebar.toggle("Modo Teste (Dry-run)", value=bool(st.secrets.get("api_client", {}).get("dry_run", False)))
+    st.session_state[SK.CFG] = {"dry_run": dry_run}
+    
+    with st.sidebar.expander("Regras de Similaridade por Pasta"):
+        st.json(st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {}))
+
+    return dict(
+        min_sim=min_sim, min_containment=min_containment, pre_delta=pre_delta,
+        diff_limit=diff_limit, dias_hist=dias_hist,
+        pastas=pastas_sel, status=status_sel, use_cnj=use_cnj,
+        strict_only=strict_only, only_groups_with_open=only_groups_with_open
+    )
+
+def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
     """
-    components.html(js_script, height=0, width=0)
+    Calcula qual item do grupo é o 'melhor principal' (medoid).
+    LÓGICA ATUALIZADA: Prioriza atividades com status 'Fechada' ou 'Concluída',
+    ignora 'Cancelada' e deixa 'Aberta' como última opção.
+    """
+    if not group_rows:
+        return ""
+
+    active_candidates = [r for r in group_rows if "Cancelad" not in r.get("activity_status", "")]
+    if not active_candidates:
+        return group_rows[0]['activity_id']
+
+    closed_candidates = [r for r in active_candidates if r.get("activity_status") != "Aberta"]
+    open_candidates = [r for r in active_candidates if r.get("activity_status") == "Aberta"]
+
+    candidates = closed_candidates + open_candidates
+    if not candidates:
+        return group_rows[0]['activity_id']
+
+    best_id, max_avg_score = None, -1.0
+    
+    cache = {r['activity_id']: (normalize_for_match(r.get('Texto', ''), []), extract_meta(r.get('Texto', ''))) for r in group_rows}
+
+    for candidate in candidates:
+        candidate_id = candidate['activity_id']
+        c_norm, c_meta = cache[candidate_id]
+        scores = []
+        for other in group_rows:
+            if other['activity_id'] == candidate_id: continue
+            o_norm, o_meta = cache[other['activity_id']]
+            
+            score, details = combined_score(c_norm, o_norm, c_meta, o_meta)
+            if score >= min_sim_pct and details['contain'] >= min_containment_pct:
+                scores.append(score)
+        
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        if best_id is None or avg_score > max_avg_score:
+            max_avg_score, best_id = avg_score, candidate_id
+        
+        if candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
+            break
+            
+    return best_id or group_rows[0]['activity_id']
+
+def render_group(group_rows: List[Dict], params: Dict, db_firestore):
+    group_id = group_rows[0]["activity_id"]; user = st.session_state.get(SK.USERNAME, "desconhecido")
+    state = st.session_state[SK.GROUP_STATES].setdefault(group_id, {"principal_id": None, "open_compare": None, "cancelados": set()})
+    pasta = group_rows[0].get("activity_folder", "N/A")
+
+    if state["principal_id"] is None or not any(r["activity_id"] == state["principal_id"] for r in group_rows):
+        state["principal_id"] = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
+
+    principal = next((r for r in group_rows if r["activity_id"] == state["principal_id"]), group_rows[0])
+    
+    # 1. Filtra os itens a serem exibidos com base no modo estrito
+    if params['strict_only']:
+        p_norm = normalize_for_match(principal.get("Texto", ""), [])
+        p_meta = extract_meta(principal.get("Texto", ""))
+        visible_rows = [principal]
+        for row in group_rows:
+            if row["activity_id"] == principal["activity_id"]: continue
+            r_norm = normalize_for_match(row.get("Texto", ""), [])
+            r_meta = extract_meta(row.get("Texto", ""))
+            score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+            if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
+                visible_rows.append(row)
+    else:
+        visible_rows = group_rows
+
+    # 2. Reordena a lista para garantir que o principal venha primeiro
+    display_rows = sorted(visible_rows, key=lambda r: r["activity_id"] != principal["activity_id"])
+
+    open_count = sum(1 for r in display_rows if r.get('activity_status') == 'Aberta')
+    expander_title = (f"Grupo: {len(display_rows)} itens ({open_count} Abertas) | Pasta: {pasta} | Principal Sugerido: #{state['principal_id']}")
+    
+    with st.expander(expander_title):
+        log_details = {"group_id": group_id, "pasta": pasta, "principal_id": state["principal_id"]}
+        cols = st.columns([1/3, 1/3, 1/3])
+        if cols[0].button("⭐ Recalcular Principal", key=f"recalc_princ_{group_id}", use_container_width=True):
+            best_id = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
+            log_details.update({"previous_principal_id": state["principal_id"], "new_principal_id": best_id, "method": "automatic_recalc"})
+            log_action_to_firestore(db_firestore, user, "set_principal", log_details); 
+            state["principal_id"] = best_id; state["open_compare"] = None; st.rerun()
+        
+        if cols[1].button("🗑️ Marcar Todos p/ Cancelar", key=f"cancel_all_{group_id}", use_container_width=True):
+            ids_to_cancel = {r['activity_id'] for r in display_rows if r['activity_id'] != state['principal_id']}
+            state['cancelados'].update(ids_to_cancel)
+            log_details.update({"cancelled_ids": list(ids_to_cancel)})
+            log_action_to_firestore(db_firestore, user, "mark_all_cancel", log_details); st.rerun()
+        
+        if cols[2].button("👍 Não é Duplicado", key=f"not_dup_{group_id}", use_container_width=True):
+            st.session_state[SK.IGNORED_GROUPS].add(group_id)
+            log_details.update({"member_ids": [r['activity_id'] for r in group_rows]})
+            log_action_to_firestore(db_firestore, user, "mark_not_duplicate", log_details); st.rerun()
+        st.markdown("---")
+
+        for row in display_rows:
+            rid = row["activity_id"]; is_principal = (rid == state["principal_id"]); is_comparing = (rid == state["open_compare"]); is_marked_for_cancel = (rid in state["cancelados"])
+            card_class = "card card-principal" if is_principal else "card card-cancelado" if is_marked_for_cancel else "card"
+            
+            with st.container():
+                st.markdown(f"<div class='{card_class}'>", unsafe_allow_html=True)
+                c1, c2 = st.columns([0.7, 0.3])
+                with c1:
+                    dt = pd.to_datetime(row.get("activity_date")).tz_localize(TZ_UTC).tz_convert(TZ_SP) if pd.notna(row.get("activity_date")) else None
+                    st.markdown(f"**ID:** `{rid}` {'⭐ **Principal**' if is_principal else ''} {'🗑️ **Marcado p/ Cancelar**' if is_marked_for_cancel else ''}")
+                    st.caption(f"**Data:** {dt.strftime('%d/%m/%Y %H:%M') if dt else 'N/A'} | **Status:** {row.get('activity_status','')} | **Usuário:** {row.get('user_profile_name','')}")
+                    if not is_principal:
+                        p_norm = normalize_for_match(principal.get("Texto", ""), [])
+                        p_meta = extract_meta(principal.get("Texto", ""))
+                        r_norm = normalize_for_match(row.get("Texto", ""), []); r_meta = extract_meta(row.get("Texto", ""))
+                        score, details = combined_score(p_norm, r_norm, p_meta, r_meta); score_pct = params['min_sim'] * 100
+                        badge_color = "badge-green" if score >= score_pct + 5 else "badge-yellow" if score >= score_pct else "badge-red"
+                        tooltip = f"Set: {details['set']:.0f}% | Sort: {details['sort']:.0f}% | Contain: {details['contain']:.0f}% | Bônus: {details['bonus']}"
+                        st.markdown(f"<span class='similarity-badge {badge_color}' title='{tooltip}'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
+                    st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}")
+                    
+                    links = get_zflow_links(rid)
+                    b_cols = st.columns(2)
+                    b_cols[0].link_button("Abrir no ZFlow v1", links["v1"], use_container_width=True)
+                    b_cols[1].link_button("Abrir no ZFlow v2", links["v2"], use_container_width=True)
+
+                with c2:
+                    log_details_row = log_details.copy()
+                    if not is_principal:
+                        if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
+                            log_details_row.update({"previous_principal_id": state["principal_id"], "new_principal_id": rid, "method": "manual"})
+                            log_action_to_firestore(db_firestore, user, "set_principal", log_details_row); 
+                            state["principal_id"] = rid; state["open_compare"] = None; st.rerun()
+                        if st.button("⚖️ Comparar com Principal", key=f"cmp_{rid}", use_container_width=True):
+                            state["open_compare"] = rid if not is_comparing else None; st.rerun()
+                    if not is_principal and is_comparing:
+                        st.markdown("---")
+                        cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
+                        if cancel_checked != is_marked_for_cancel:
+                            action = "mark_cancel" if cancel_checked else "unmark_cancel"
+                            log_details_row.update({"target_activity_id": rid})
+                            log_action_to_firestore(db_firestore, user, action, log_details_row)
+                            if cancel_checked: state["cancelados"].add(rid)
+                            else: state["cancelados"].discard(rid)
+                            st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        if state["open_compare"]:
+            comparado_row = next((r for r in group_rows if r["activity_id"] == state["open_compare"]), None)
+            if comparado_row:
+                st.markdown("---"); st.subheader("Comparação Detalhada (Diff)")
+                st.markdown("""<div style='margin-bottom: 10px;'><strong>Legenda:</strong> <span style='background-color: #c8e6c9;'>Adicionado</span> <span style='background-color: #ffcdd2; margin-left: 10px;'>Removido</span></div>""", unsafe_allow_html=True)
+                c1, c2 = st.columns(2); c1.markdown(f"**Principal: ID `{principal['activity_id']}`**"); c2.markdown(f"**Comparado: ID `{comparado_row['activity_id']}`**")
+                hA, hB = highlight_diffs_safe(principal.get("Texto", ""), comparado_row.get("Texto", ""), params['diff_limit'])
+                c1.markdown(hA, unsafe_allow_html=True); c2.markdown(hB, unsafe_allow_html=True)
+
+# =============================================================================
+# AÇÕES, CALIBRAÇÃO E HISTÓRICO
+# =============================================================================
+def export_groups_csv(groups: List[List[Dict]]) -> bytes:
+    rows = [];
+    for i, g in enumerate(groups):
+        for r in g:
+            rows.append({"group_index": i + 1, "group_size": len(g), "activity_id": r.get("activity_id"), "activity_folder": r.get("activity_folder"), "activity_date": r.get("activity_date"), "activity_status": r.get("activity_status"), "user_profile_name": r.get("user_profile_name"), "Texto": r.get("Texto","")})
+    if not rows: return b""
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+
+def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_firestore):
+    client = api_client();
+    if not client: st.error("Cliente de API não configurado."); return
+    client.dry_run = st.session_state[SK.CFG].get("dry_run", True)
+    st.info(f"Iniciando o cancelamento de {len(to_cancel_with_context)} atividades...")
+    progress = st.progress(0); results = {"ok": 0, "err": 0}
+    for i, item in enumerate(to_cancel_with_context):
+        act_id = item["ID a Cancelar"]; principal_id = item["Duplicata do Principal"]
+        try:
+            response = client.activity_canceled(activity_id=act_id, user_name=user, principal_id=principal_id)
+            if response and (response.get("ok") or response.get("success") or response.get("code") == '200'):
+                results["ok"] += 1; log_action_to_firestore(db_firestore, user, "process_cancellation_success", item)
+            else:
+                results["err"] += 1; item["api_response"] = response; log_action_to_firestore(db_firestore, user, "process_cancellation_failure", item); st.warning(f"Falha ao cancelar {act_id}. Resposta: {response}")
+        except Exception as e:
+            results["err"] += 1; item["exception"] = str(e); log_action_to_firestore(db_firestore, user, "process_cancellation_exception", item); st.error(f"Erro de exceção ao cancelar {act_id}: {e}")
+        progress.progress((i + 1) / len(to_cancel_with_context))
+    st.success(f"Processamento concluído! Sucessos: {results['ok']}, Falhas: {results['err']}.")
+    if client.dry_run: st.warning("Atenção: O modo Teste (Dry-run) está ativo.")
+    for g_state in st.session_state[SK.GROUP_STATES].values(): g_state["cancelados"].clear()
+    carregar_dados_mysql.clear(); criar_grupos_de_duplicatas.clear(); st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
+
+@st.dialog("Confirmação de Cancelamento")
+def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestore, params: Dict):
+    to_cancel_with_context = []; score_cache = {}
+    for g in groups:
+        gid = g[0]["activity_id"]; state = st.session_state[SK.GROUP_STATES].get(gid, {}); principal_id = state.get("principal_id")
+        if principal_id:
+            principal_row = next((r for r in g if r['activity_id'] == principal_id), None)
+            if not principal_row: continue
+            p_norm = normalize_for_match(principal_row.get("Texto", ""), []); p_meta = extract_meta(principal_row.get("Texto", ""))
+            for cancel_id in state.get("cancelados", set()):
+                cancel_row = next((r for r in g if r['activity_id'] == cancel_id), None)
+                if not cancel_row: continue
+                if (principal_id, cancel_id) not in score_cache:
+                    c_norm = normalize_for_match(cancel_row.get("Texto", ""), []); c_meta = extract_meta(cancel_row.get("Texto", ""))
+                    score, _ = combined_score(p_norm, c_norm, p_meta, c_meta); score_cache[(principal_id, cancel_id)] = score
+                to_cancel_with_context.append({"ID a Cancelar": cancel_id, "Duplicata do Principal": principal_id, "Pasta": cancel_row.get("activity_folder", "N/A"), "Similaridade (%)": f"{score_cache[(principal_id, cancel_id)]:.0f}"})
+    if not to_cancel_with_context:
+        st.info("Nenhuma atividade foi marcada para cancelamento.");
+        if st.button("Fechar"): st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
+        return
+    st.warning("Atenção: A ação a seguir é irreversível."); st.write(f"Você está prestes a cancelar **{len(to_cancel_with_context)}** atividades."); st.dataframe(to_cancel_with_context, use_container_width=True)
+    col1, col2 = st.columns(2)
+    if col1.button("✅ Confirmar e Cancelar", type="primary", use_container_width=True): process_cancellations(to_cancel_with_context, user, db_firestore)
+    if col2.button("Voltar", use_container_width=True): st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
+
+def render_calibration_tab(df: pd.DataFrame):
+    st.subheader("📊 Calibração de Similaridade por Pasta")
+    st.info("Esta ferramenta ajuda a encontrar o limiar de similaridade ideal para cada pasta.")
+    if df.empty: st.warning("Não há dados para calibrar."); return
+    pasta = st.selectbox("Selecione uma pasta:", sorted(df["activity_folder"].dropna().unique()))
+    col1, col2 = st.columns(2); num_samples = col1.slider("Nº de Pares Aleatórios", 50, 2000, 500, 50); min_containment_filter = col2.slider("Filtro de Containment Mínimo (%)", 0, 100, 0, 1)
+    if st.button("Analisar Pasta"):
+        sample_df = df[df["activity_folder"] == pasta].copy()
+        if len(sample_df) < 2: st.warning("A pasta tem menos de 2 atividades."); return
+        stopwords_extra = st.secrets.get("similarity", {}).get("stopwords_extra", [])
+        sample_df["_meta"] = sample_df["Texto"].apply(extract_meta); sample_df["_norm"] = sample_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra)); sample_df = sample_df.reset_index()
+        n = len(sample_df); indices = np.arange(n); pairs = set(); rng = np.random.default_rng(seed=42)
+        while len(pairs) < min(num_samples, (n * (n - 1)) // 2): pairs.add(tuple(sorted(rng.choice(indices, size=2, replace=False))))
+        scores = []; progress = st.progress(0, text="Calculando scores...")
+        for i, (idx1, idx2) in enumerate(pairs):
+            row1, row2 = sample_df.iloc[idx1], sample_df.iloc[idx2]
+            score, details = combined_score(row1["_norm"], row2["_norm"], row1["_meta"], row2["_meta"])
+            if details["contain"] >= min_containment_filter: scores.append({"score": score, "containment": details["contain"]})
+            progress.progress((i + 1) / len(pairs))
+        progress.empty()
+        if not scores: st.info("Nenhum par encontrado após filtro de containment."); return
+        df_scores = pd.DataFrame(scores); st.write("Estatísticas Descritivas:"); st.dataframe(df_scores["score"].describe(percentiles=[.25, .5, .75, .9, .95, .99]))
+        if alt: st.altair_chart(alt.Chart(df_scores).mark_bar().encode(x=alt.X("score:Q", bin=alt.Bin(maxbins=50)), y=alt.Y("count()")).properties(title=f"Distribuição para: {pasta}", height=300), use_container_width=True)
+
+@st.cache_data(ttl=600)
+def get_firestore_history(_db, limit=100):
+    if _db is None: return []
+    try: return [doc.to_dict() for doc in _db.collection("duplicidade_actions").order_by("ts", direction=firestore.Query.DESCENDING).limit(limit).stream()]
+    except Exception as e: st.error(f"Erro ao buscar histórico do Firestore: {e}"); return []
+
+def format_history_for_display(history: List[Dict]) -> pd.DataFrame:
+    """Transforma a lista de logs do Firestore em um DataFrame legível."""
+    if not history:
+        return pd.DataFrame()
+
+    parsed_logs = []
+    for log in history:
+        ts = log.get("ts")
+        ts_local = ts.astimezone(TZ_SP) if isinstance(ts, datetime) else "N/A"
+        details = log.get("details", {})
+        
+        action_map = {
+            "set_principal": "Definição de Principal", "mark_all_cancel": "Marcar Todos para Cancelar",
+            "mark_not_duplicate": "Marcar Grupo como 'Não Duplicado'", "mark_cancel": "Marcar para Cancelar",
+            "unmark_cancel": "Desmarcar para Cancelar", "process_cancellation_success": "Cancelamento via API (Sucesso)",
+            "process_cancellation_failure": "Cancelamento via API (Falha)", "process_cancellation_exception": "Cancelamento via API (Erro)",
+        }
+        
+        description = ""
+        if log.get("action") == "set_principal":
+            description = f"ID {details.get('new_principal_id')} definido como principal, substituindo {details.get('previous_principal_id')}."
+        elif log.get("action") == "mark_cancel":
+            description = f"ID {details.get('target_activity_id')} marcado para ser cancelado (principal: {details.get('principal_id')})."
+        elif log.get("action") == "unmark_cancel":
+            description = f"ID {details.get('target_activity_id')} desmarcado (principal: {details.get('principal_id')})."
+        elif log.get("action") == "process_cancellation_success":
+            description = f"ID {details.get('ID a Cancelar')} cancelado com sucesso (duplicata de {details.get('Duplicata do Principal')})."
+        elif log.get("action") == "mark_not_duplicate":
+            description = f"Grupo iniciado por {details.get('group_id')} foi marcado como 'Não é Duplicado'."
+        else:
+            description = json.dumps(details, ensure_ascii=False)
+
+        parsed_logs.append({
+            "Data": ts_local.strftime('%d/%m/%Y %H:%M:%S') if ts_local != "N/A" else "N/A",
+            "Usuário": log.get("user", "N/A"),
+            "Ação": action_map.get(log.get("action"), log.get("action", "N/A")),
+            "Pasta": details.get("pasta", details.get("Pasta", "N/A")), # Pega a pasta
+            "Detalhes": description,
+        })
+        
+    return pd.DataFrame(parsed_logs)
+
+def render_history_tab(db_firestore):
+    """Renderiza a aba de histórico com múltiplas visões e opções de exportação."""
+    st.subheader("📜 Histórico de Ações (Auditoria)")
+    if db_firestore is None:
+        st.warning("A conexão com o Firebase (auditoria) não está ativa.")
+        return
+
+    if st.button("Atualizar Histórico"):
+        get_firestore_history.clear()
+
+    history = get_firestore_history(db_firestore)
+    if not history:
+        st.info("Nenhum registro de auditoria encontrado.")
+        return
+
+    friendly_tab, raw_tab = st.tabs(["Visão Amigável (Tabela)", "Dados Brutos (JSON)"])
+
+    with friendly_tab:
+        st.write("Uma visão simplificada das ações realizadas, ideal para auditoria rápida.")
+        df_friendly = format_history_for_display(history)
+        
+        st.dataframe(df_friendly, use_container_width=True, hide_index=True)
+        
+        csv_data = df_friendly.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ Exportar para CSV",
+            data=csv_data,
+            file_name=f"historico_duplicidades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+
+    with raw_tab:
+        st.write("Os dados completos como estão armazenados no banco de dados. Útil para depuração.")
+        
+        def json_converter(o):
+            if isinstance(o, datetime):
+                return o.isoformat()
+        
+        json_data = json.dumps(history, default=json_converter, indent=2, ensure_ascii=False)
+        st.download_button(
+            label="⬇️ Exportar para JSON",
+            data=json_data,
+            file_name=f"historico_duplicidades_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+        )
+        
+        st.json(history)
+
+
+# =============================================================================
+# FLUXO PRINCIPAL DO APLICATIVO
+# =============================================================================
+def main():
+    st.title(APP_TITLE)
+    for key in [SK.USERNAME, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM, SK.IGNORED_GROUPS]:
+        if key not in st.session_state:
+            st.session_state[key] = set() if key == SK.IGNORED_GROUPS else {} if key == SK.GROUP_STATES else False
+
+    if not st.session_state.get(SK.USERNAME):
+        with st.sidebar.form("login_form"):
+            username = st.text_input("Nome de Usuário"); password = st.text_input("Senha", type="password")
+            if st.form_submit_button("Entrar"):
+                if username and password and st.secrets.credentials.usernames.get(username) == password:
+                    st.session_state[SK.USERNAME] = username; st.rerun()
+                else: st.sidebar.error("Usuário ou senha inválidos.")
+        st.info("👋 Bem-vindo! Por favor, faça o login na barra lateral."); st.stop()
+
+    engine = db_engine_mysql(); db_firestore = init_firebase()
+    df_full = carregar_dados_mysql(engine, 365)
+    params = sidebar_controls(df_full)
+    df_analysis = carregar_dados_mysql(engine, params["dias_hist"])
+    
+    if df_analysis.empty: st.warning("Nenhuma atividade encontrada para o período de análise."); st.stop()
+
+    core_params = {k: params[k] for k in ['min_sim', 'min_containment', 'pre_delta', 'use_cnj']}
+    
+    with st.spinner("Analisando duplicatas... Este processo pode levar um momento."):
+        all_groups = criar_grupos_de_duplicatas(df_analysis, core_params)
+
+    current_first_group_id = all_groups[0][0]['activity_id'] if all_groups else None
+    if 'last_group_id' not in st.session_state or st.session_state.last_group_id != current_first_group_id:
+        st.session_state[SK.GROUP_STATES] = {}
+        st.session_state.last_group_id = current_first_group_id
+
+    # Lógica de filtragem corrigida
+    final_filtered_groups = []
+    for group in all_groups:
+        # Filtro 1: Pastas
+        if params["pastas"] and group[0].get("activity_folder") not in params["pastas"]:
+            continue
+
+        # Pré-cálculo do "Modo Estrito" para garantir que os filtros subsequentes
+        # operem no conjunto de dados que será efetivamente exibido.
+        rows_to_check = group
+        if params["strict_only"]:
+            principal_id = get_best_principal_id(group, params['min_sim'] * 100, params['min_containment'])
+            principal = next((r for r in group if r["activity_id"] == principal_id), group[0])
+            p_norm = normalize_for_match(principal.get("Texto", ""), [])
+            p_meta = extract_meta(principal.get("Texto", ""))
+            
+            visible_rows = [principal]
+            for row in group:
+                if row["activity_id"] == principal["activity_id"]: continue
+                r_norm = normalize_for_match(row.get("Texto", ""), [])
+                r_meta = extract_meta(row.get("Texto", ""))
+                score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+                if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
+                    visible_rows.append(row)
+            
+            # Um grupo de duplicatas precisa ter pelo menos 2 itens (principal + 1 duplicata)
+            if len(visible_rows) < 2:
+                continue
+            
+            rows_to_check = visible_rows
+
+        # Filtro 2: Apenas grupos com atividades abertas (agora sobre a visão correta)
+        if params["only_groups_with_open"]:
+            if not any(r.get("activity_status") == "Aberta" for r in rows_to_check):
+                continue
+
+        # Filtro 3: Status selecionados no multiselect (agora sobre a visão correta)
+        if params["status"]:
+            if not any(r.get("activity_status") in params["status"] for r in rows_to_check):
+                continue
+
+        # Se o grupo passou por todos os filtros, adicionamos o grupo ORIGINAL para ser renderizado
+        final_filtered_groups.append(group)
+
+    filtered_groups = [g for g in final_filtered_groups if g[0]['activity_id'] not in st.session_state[SK.IGNORED_GROUPS]]
+
+    tab1, tab2, tab3 = st.tabs(["🔎 Análise de Duplicidades", "📊 Calibração", "📜 Histórico de Ações"])
+
+    with tab1:
+        st.metric("Grupos de Duplicatas Encontrados (após filtros)", len(filtered_groups))
+        page_size = st.number_input("Grupos por página", min_value=5, value=DEFAULTS["itens_por_pagina"], step=5)
+        total_pages = max(1, math.ceil(len(filtered_groups) / page_size))
+        page_num = st.number_input("Página", min_value=1, max_value=total_pages, value=1, step=1)
+        start_idx = (page_num - 1) * page_size; end_idx = start_idx + page_size
+        st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(filtered_groups))} de {len(filtered_groups)}")
+
+        for group in filtered_groups[start_idx:end_idx]:
+            render_group(group, params, db_firestore)
+
+        st.markdown("---"); st.header("⚡ Ações em Massa")
+        col_a, col_b = st.columns(2)
+        col_a.download_button("⬇️ Exportar Grupos para CSV", data=export_groups_csv(filtered_groups), file_name="relatorio_duplicatas.csv", mime="text/csv", use_container_width=True)
+        if col_b.button("🚀 Processar Cancelamentos Marcados", type="primary", use_container_width=True):
+            st.session_state[SK.SHOW_CANCEL_CONFIRM] = True
+        
+        if st.session_state.get(SK.SHOW_CANCEL_CONFIRM):
+            confirm_cancellation_dialog(filtered_groups, st.session_state.get(SK.USERNAME), db_firestore, params)
+
+    with tab2: render_calibration_tab(df_full)
+    with tab3: render_history_tab(db_firestore)
 
 if __name__ == "__main__":
     main()
