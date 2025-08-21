@@ -317,10 +317,12 @@ def extract_meta(text: str) -> Dict[str, str]:
             
     return meta
 
-@lru_cache(maxsize=100_000)
 def normalize_for_match(text: str, stopwords_extra: List[str] | tuple) -> str:
     """Aplica uma série de normalizações ao texto para melhorar a comparação."""
-    if not isinstance(text, str): return ""
+    if not isinstance(text, str):
+    pass
+
+return ""
     t = text
     t = URL_RE.sub(" url ", t)
     t = CNJ_RE.sub(" numproc ", t)
