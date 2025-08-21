@@ -74,7 +74,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v10_final_filters"
+SUFFIX = "_v11_final_bugfix"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
@@ -773,7 +773,7 @@ def main():
         st.session_state[SK.GROUP_STATES] = {}
         st.session_state.last_group_id = current_first_group_id
 
-    # ALTERAÇÃO: Lógica de filtragem reescrita para ser mais explícita e corrigir bugs
+    # Lógica de filtragem
     final_filtered_groups = []
     for group in all_groups:
         # Filtro 1: Pastas
@@ -807,7 +807,7 @@ def main():
                     valid_duplicates_count += 1
             
             if valid_duplicates_count == 0:
-                continue # Pula o grupo se não tiver duplicatas válidas no modo estrito
+                continue 
 
         # Se o grupo passou por todos os filtros, ele é adicionado
         final_filtered_groups.append(group)
