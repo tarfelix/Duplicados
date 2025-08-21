@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Verificador de Duplicidade — Versão Otimizada
-=============================================
+Verificador de Duplicidade — Versão Otimizada e Corrigida
+=========================================================
 
 Este aplicativo combina as funcionalidades avançadas da versão 'appdelta'
-com as otimizações de performance e funcionalidades ausentes da versão original.
+com as otimizações de performance e a lógica de negócio corrigida para
+a seleção do item principal, evitando que atividades canceladas sejam
+sugeridas como principais.
 
 Principais Correções e Melhorias:
-- Otimização do Cache: O cálculo pesado de similaridade agora é executado
-  apenas quando os dados ou os parâmetros principais mudam, não a cada
-  alteração de filtro da UI.
+- Lógica do Principal Corrigida: A função `get_best_principal_id` agora
+  ignora atividades com status 'Cancelado' ao eleger o principal.
+- Otimização do Cache: O cálculo pesado de similaridade é executado
+  apenas quando os dados ou os parâmetros principais mudam.
 - Gerenciamento de Estado: O 'session_state' que armazena o estado dos grupos
-  agora é limpo quando os dados são recalculados, evitando acúmulo de memória.
+  é limpo quando os dados são recalculados, evitando acúmulo de memória.
 - Reintrodução de Funcionalidades: Os links para ZFlow v1 e v2 foram adicionados
   de volta à interface de cada atividade.
-- Melhoria de UX: Um spinner é exibido durante o cálculo de similaridade para
-  informar o usuário que a aplicação está trabalhando.
+- Melhoria de UX: Um spinner é exibido durante o cálculo de similaridade.
 """
 from __future__ import annotations
 
@@ -69,7 +71,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v5_otimizado"
+SUFFIX = "_v6_final_corrigido"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
@@ -206,7 +208,6 @@ DATENUM_RE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\
 NUM_RE = re.compile(r"\b\d+\b")
 STOPWORDS_BASE = set("de da do das dos e em a o os as na no para por com que ao aos às à um uma umas uns tipo titulo inteiro teor publicado publicacao disponibilizacao orgao vara tribunal processo recurso intimacao notificacao justica nacional diario djen poder judiciario trabalho".split())
 
-## ALTERAÇÃO: Adicionando a função de links do ZFlow que estava faltando.
 def get_zflow_links(activity_id: str | int) -> dict:
     """Gera os links para as plataformas ZFlow v1 e v2."""
     return {
@@ -265,7 +266,7 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
     return final_score, details
 
 # =============================================================================
-# LÓGICA DE AGRUPAMENTO (AGORA CORRETAMENTE CACHEADA)
+# LÓGICA DE AGRUPAMENTO
 # =============================================================================
 
 def build_buckets(df: pd.DataFrame, use_cnj: bool) -> Dict[str, List[int]]:
@@ -277,8 +278,6 @@ def build_buckets(df: pd.DataFrame, use_cnj: bool) -> Dict[str, List[int]]:
         buckets[key].append(i)
     return buckets
 
-## ALTERAÇÃO: Envolvemos a função em @st.cache_data para um cache mais robusto
-## e removemos a lógica manual de 'sig' de dentro da função.
 @st.cache_data(ttl=3600)
 def criar_grupos_de_duplicatas(_df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
     if _df.empty: return []
@@ -396,28 +395,59 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
     )
 
 def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
-    if not group_rows: return ""
-    closed_candidates = [r for r in group_rows if r.get("activity_status") != "Aberta"]
-    open_candidates = [r for r in group_rows if r.get("activity_status") == "Aberta"]
+    """
+    Calcula qual item do grupo é o 'melhor principal' (medoid).
+    LÓGICA ATUALIZADA: Prioriza atividades com status 'Fechada' ou 'Concluída',
+    ignora 'Cancelada' e deixa 'Aberta' como última opção.
+    """
+    if not group_rows:
+        return ""
+
+    # Filtramos explicitamente as atividades canceladas.
+    # Elas só serão consideradas se não houver nenhuma outra opção.
+    active_candidates = [r for r in group_rows if "Cancelad" not in r.get("activity_status", "")]
+
+    # Se todas as atividades no grupo já estiverem canceladas, retorne a mais recente.
+    if not active_candidates:
+        return group_rows[0]['activity_id']
+
+    # Dentro dos candidatos ativos, separamos por prioridade.
+    # Prioridade 1: Atividades já finalizadas (Fechada, Concluída, etc.)
+    closed_candidates = [r for r in active_candidates if r.get("activity_status") != "Aberta"]
+    # Prioridade 2: Atividades abertas (que queremos cancelar)
+    open_candidates = [r for r in active_candidates if r.get("activity_status") == "Aberta"]
+
+    # A lista de candidatos para o cálculo agora prioriza os fechados e ignora os cancelados.
     candidates = closed_candidates + open_candidates
-    if not candidates: return group_rows[0]['activity_id']
+    if not candidates: # Fallback caso algo dê errado
+        return group_rows[0]['activity_id']
 
     best_id, max_avg_score = None, -1.0
+    
+    # O restante da lógica de cálculo de score permanece a mesma
     cache = {r['activity_id']: (normalize_for_match(r.get('Texto', ''), []), extract_meta(r.get('Texto', ''))) for r in group_rows}
 
     for candidate in candidates:
-        candidate_id = candidate['activity_id']; c_norm, c_meta = cache[candidate_id]; scores = []
+        candidate_id = candidate['activity_id']
+        c_norm, c_meta = cache[candidate_id]
+        scores = []
         for other in group_rows:
             if other['activity_id'] == candidate_id: continue
             o_norm, o_meta = cache[other['activity_id']]
+            
             score, details = combined_score(c_norm, o_norm, c_meta, o_meta)
             if score >= min_sim_pct and details['contain'] >= min_containment_pct:
                 scores.append(score)
         
         avg_score = sum(scores) / len(scores) if scores else 0.0
+
         if best_id is None or avg_score > max_avg_score:
             max_avg_score, best_id = avg_score, candidate_id
-        if candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]: break
+        
+        # Otimização: se já temos um principal 'fechado', não precisamos continuar
+        # avaliando os 'abertos', pois eles têm prioridade menor.
+        if candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
+            break
             
     return best_id or group_rows[0]['activity_id']
 
@@ -473,7 +503,6 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                         st.markdown(f"<span class='similarity-badge {badge_color}' title='{tooltip}'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
                     st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}")
                     
-                    ## ALTERAÇÃO: Adicionando os links do ZFlow.
                     links = get_zflow_links(rid)
                     b_cols = st.columns(2)
                     b_cols[0].link_button("Abrir no ZFlow v1", links["v1"], use_container_width=True)
@@ -507,7 +536,6 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
 # =============================================================================
 # AÇÕES, CALIBRAÇÃO E HISTÓRICO
 # =============================================================================
-# (Nenhuma alteração necessária nestas funções, elas já são eficientes)
 def export_groups_csv(groups: List[List[Dict]]) -> bytes:
     rows = [];
     for i, g in enumerate(groups):
@@ -630,24 +658,16 @@ def main():
     
     if df_analysis.empty: st.warning("Nenhuma atividade encontrada para o período de análise."); st.stop()
 
-    # Define os parâmetros que, se alterados, exigem um recálculo completo.
     core_params = {k: params[k] for k in ['min_sim', 'min_containment', 'pre_delta', 'use_cnj']}
     
-    ## ALTERAÇÃO: Lógica de cache corrigida.
-    # 1. O cálculo pesado é chamado ANTES dos filtros de exibição.
-    # 2. Usamos um spinner para dar feedback ao usuário.
     with st.spinner("Analisando duplicatas... Este processo pode levar um momento."):
         all_groups = criar_grupos_de_duplicatas(df_analysis, core_params)
 
-    ## ALTERAÇÃO: Resetamos o estado dos grupos se os parâmetros principais mudaram.
-    # Isso é inferido pela limpeza do cache de `criar_grupos_de_duplicatas`.
-    # Uma forma simples de verificar é se o primeiro grupo (se existir) mudou.
     current_first_group_id = all_groups[0][0]['activity_id'] if all_groups else None
     if 'last_group_id' not in st.session_state or st.session_state.last_group_id != current_first_group_id:
         st.session_state[SK.GROUP_STATES] = {}
         st.session_state.last_group_id = current_first_group_id
 
-    ## ALTERAÇÃO: Os filtros de exibição são aplicados DEPOIS do cálculo pesado.
     filtered_groups = all_groups
     if params["pastas"]:
         filtered_groups = [g for g in filtered_groups if g[0].get("activity_folder") in params["pastas"]]
@@ -656,7 +676,6 @@ def main():
     if params["only_groups_with_open"]:
         filtered_groups = [g for g in filtered_groups if any(r.get("activity_status") == "Aberta" for r in g)]
     
-    # Filtra os grupos ignorados pelo usuário
     filtered_groups = [g for g in filtered_groups if g[0]['activity_id'] not in st.session_state[SK.IGNORED_GROUPS]]
 
     tab1, tab2, tab3 = st.tabs(["🔎 Análise de Duplicidades", "📊 Calibração", "📜 Histórico de Ações"])
