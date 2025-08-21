@@ -28,6 +28,7 @@ import math
 from datetime import datetime, timedelta, date
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional
+from functools import lru_cache
 
 import pandas as pd
 import numpy as np
@@ -68,6 +69,13 @@ except ImportError:
 APP_TITLE = "Verificador de Duplicidade Avançado"
 TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
+
+# Links do Zion (v1 e v2)
+link_z = lambda i: {
+    'antigo': f"https://zflow.zionbyonset.com.br/activity/3/details/{i}",
+    'novo':   f"https://zflowv2.zionbyonset.com.br/public/versatile_frame.php/?moduloid=2&activityid={i}#/fixcol1"
+}
+
 
 # Chaves para o session_state do Streamlit, para evitar colisões
 SUFFIX = "_v5_final"
@@ -281,6 +289,7 @@ STOPWORDS_BASE = set("""
     processo recurso intimacao notificacao justica nacional diario djen poder judiciario trabalho
 """.split())
 
+@lru_cache(maxsize=100_000)
 def extract_meta(text: str) -> Dict[str, str]:
     """Extrai metadados estruturados (CNJ, órgão, etc.) do texto da atividade."""
     t = text or ""
@@ -308,7 +317,8 @@ def extract_meta(text: str) -> Dict[str, str]:
             
     return meta
 
-def normalize_for_match(text: str, stopwords_extra: List[str]) -> str:
+@lru_cache(maxsize=100_000)
+def normalize_for_match(text: str, stopwords_extra: List[str] | tuple) -> str:
     """Aplica uma série de normalizações ao texto para melhorar a comparação."""
     if not isinstance(text, str): return ""
     t = text
@@ -411,7 +421,7 @@ def criar_grupos_de_duplicatas(df: pd.DataFrame, params: Dict) -> List[List[Dict
     work_df = df.copy()
     
     # Pré-calcula metadados e textos normalizados para performance
-    stopwords_extra = st.secrets.get("similarity", {}).get("stopwords_extra", [])
+    stopwords_extra = tuple(st.secrets.get("similarity", {}).get("stopwords_extra", []))
     work_df["_meta"] = work_df["Texto"].apply(extract_meta)
     work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra))
 
@@ -419,7 +429,8 @@ def criar_grupos_de_duplicatas(df: pd.DataFrame, params: Dict) -> List[List[Dict
     cutoffs_map = st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {})
 
     groups = []
-    progress_bar = st.sidebar.progress(0, text="Agrupando duplicatas...")
+    show_progress = len(work_df) >= 800
+    progress_bar = st.sidebar.progress(0, text="Agrupando duplicatas...") if show_progress else None
     total_processed = 0
     total_items = len(work_df)
 
@@ -481,9 +492,13 @@ def criar_grupos_de_duplicatas(df: pd.DataFrame, params: Dict) -> List[List[Dict
                 groups.append(group_data)
 
         total_processed += len(idxs)
-        progress_bar.progress(min(1.0, total_processed / total_items), text=f"Agrupando (bucket {bkey})...")
+            
+        if progress_bar:
+            progress_bar.progress(min(1.0, total_processed / total_items), text=f"Agrupando (bucket {bkey})...")
     
-    progress_bar.empty()
+        
+    if progress_bar:
+        progress_bar.empty()
     st.session_state[SK.SIMILARITY_CACHE] = {"sig": sig, "groups": groups}
     return groups
 
@@ -732,6 +747,11 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                     st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}")
 
                 with c2:
+                    # Links do Zion
+                    links = link_z(rid)
+                    st.link_button("ZFlow v1", links['antigo'])
+                    st.link_button("ZFlow v2", links['novo'])
+                    st.markdown("---")
                     if not is_principal:
                         if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
                             log_action_to_firestore(db_firestore, user, "set_principal", {
@@ -920,7 +940,7 @@ def render_calibration_tab(df: pd.DataFrame):
         if len(sample_df) < 2:
             st.warning("A pasta selecionada tem menos de 2 atividades para comparar."); return
 
-        stopwords_extra = st.secrets.get("similarity", {}).get("stopwords_extra", [])
+        stopwords_extra = tuple(st.secrets.get("similarity", {}).get("stopwords_extra", []))
         sample_df["_meta"] = sample_df["Texto"].apply(extract_meta)
         sample_df["_norm"] = sample_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra))
         sample_df = sample_df.reset_index()
@@ -1021,8 +1041,7 @@ def main():
 
     engine = db_engine_mysql()
     db_firestore = init_firebase()
-    df_full = carregar_dados_mysql(engine, 365)
-    params = sidebar_controls(df_full)
+    params = sidebar_controls(pd.DataFrame())
     df_analysis = carregar_dados_mysql(engine, params["dias_hist"])
     
     if df_analysis.empty:
@@ -1047,7 +1066,7 @@ def main():
 
         st.metric("Grupos de Duplicatas Encontrados", len(groups))
 
-        page_size = st.number_input("Grupos por página", min_value=5, value=DEFAULTS["itens_por_pagina"], step=5)
+        page_size = st.number_input("Grupos por página", min_value=5, value=min(10, DEFAULTS["itens_por_pagina"]), step=5)
         total_pages = max(1, math.ceil(len(groups) / page_size))
         page_num = st.number_input("Página", min_value=1, max_value=total_pages, value=1, step=1)
         start_idx = (page_num - 1) * page_size
@@ -1071,6 +1090,7 @@ def main():
             confirm_cancellation_dialog(groups, st.session_state.get(SK.USERNAME), db_firestore, params)
 
     with tab2:
+        df_full = carregar_dados_mysql(engine, 365)
         render_calibration_tab(df_full)
     with tab3:
         render_history_tab(db_firestore)
