@@ -773,43 +773,48 @@ def main():
         st.session_state[SK.GROUP_STATES] = {}
         st.session_state.last_group_id = current_first_group_id
 
-    # Lógica de filtragem
+    # Lógica de filtragem corrigida
     final_filtered_groups = []
     for group in all_groups:
         # Filtro 1: Pastas
         if params["pastas"] and group[0].get("activity_folder") not in params["pastas"]:
             continue
 
-        # Filtro 2: Apenas grupos com atividades abertas (tem prioridade)
-        if params["only_groups_with_open"]:
-            if not any(r.get("activity_status") == "Aberta" for r in group):
-                continue
-
-        # Filtro 3: Status selecionados no multiselect
-        if params["status"]:
-            if not any(r.get("activity_status") in params["status"] for r in group):
-                continue
-
-        # Filtro 4: Lógica do Modo Estrito
+        # Pré-cálculo do "Modo Estrito" para garantir que os filtros subsequentes
+        # operem no conjunto de dados que será efetivamente exibido.
+        rows_to_check = group
         if params["strict_only"]:
             principal_id = get_best_principal_id(group, params['min_sim'] * 100, params['min_containment'])
             principal = next((r for r in group if r["activity_id"] == principal_id), group[0])
             p_norm = normalize_for_match(principal.get("Texto", ""), [])
             p_meta = extract_meta(principal.get("Texto", ""))
             
-            valid_duplicates_count = 0
+            visible_rows = [principal]
             for row in group:
-                if row["activity_id"] == principal_id: continue
+                if row["activity_id"] == principal["activity_id"]: continue
                 r_norm = normalize_for_match(row.get("Texto", ""), [])
                 r_meta = extract_meta(row.get("Texto", ""))
                 score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
                 if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
-                    valid_duplicates_count += 1
+                    visible_rows.append(row)
             
-            if valid_duplicates_count == 0:
-                continue 
+            # Um grupo de duplicatas precisa ter pelo menos 2 itens (principal + 1 duplicata)
+            if len(visible_rows) < 2:
+                continue
+            
+            rows_to_check = visible_rows
 
-        # Se o grupo passou por todos os filtros, ele é adicionado
+        # Filtro 2: Apenas grupos com atividades abertas (agora sobre a visão correta)
+        if params["only_groups_with_open"]:
+            if not any(r.get("activity_status") == "Aberta" for r in rows_to_check):
+                continue
+
+        # Filtro 3: Status selecionados no multiselect (agora sobre a visão correta)
+        if params["status"]:
+            if not any(r.get("activity_status") in params["status"] for r in rows_to_check):
+                continue
+
+        # Se o grupo passou por todos os filtros, adicionamos o grupo ORIGINAL para ser renderizado
         final_filtered_groups.append(group)
 
     filtered_groups = [g for g in final_filtered_groups if g[0]['activity_id'] not in st.session_state[SK.IGNORED_GROUPS]]
