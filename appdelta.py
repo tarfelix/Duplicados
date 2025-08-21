@@ -8,14 +8,16 @@ com as otimizações de performance e a lógica de negócio corrigida para
 a seleção do item principal e exibição de grupos.
 
 Principais Correções e Melhorias:
-- Lógica do Modo Estrito Corrigida: Grupos com apenas um item após a filtragem
-  do modo estrito não são mais exibidos.
+- Ordem de Exibição Corrigida: O item "Principal" agora é sempre o primeiro
+  a ser exibido dentro de um grupo.
+- Estilo Visual Aprimorado: As cores para os status "Principal" e "Cancelado"
+  estão mais vivas e destacadas.
+- Lógica do Modo Estrito Aprimorada: Garante que apenas itens que atendam
+  diretamente ao critério de similaridade com o principal sejam exibidos.
 - Similaridade Padrão Ajustada: O valor padrão da similaridade global foi
   reforçado para 95% na interface.
 - Histórico Aprimorado: A aba de histórico agora exibe a Pasta da atividade
   e mantém as opções de exportação para CSV e JSON.
-- Lógica do Principal Corrigida: A função `get_best_principal_id` agora
-  ignora atividades com status 'Cancelado' ao eleger o principal.
 - Otimização do Cache: O cálculo pesado de similaridade é executado
   apenas quando os dados ou os parâmetros principais mudam.
 - Melhoria de UX: Um spinner é exibido durante o cálculo de similaridade.
@@ -73,7 +75,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v8_final_strict"
+SUFFIX = "_v9_final_ordering"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
@@ -103,8 +105,9 @@ st.markdown("""
     .diff-del { background-color: #ffcdd2 !important; text-decoration: none !important; }
     .diff-ins { background-color: #c8e6c9 !important; text-decoration: none !important; }
     .card { border-left: 5px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px; background-color: #fff; }
-    .card-cancelado { background-color: #f5f5f5; border-left: 5px solid #e0e0e0; }
-    .card-principal { border-left: 5px solid #4CAF50; }
+    /* ALTERAÇÃO: Cores mais vivas para os cards */
+    .card-cancelado { background-color: #FFEBEE; border-left: 5px solid #F44336; }
+    .card-principal { background-color: #E8F5E9; border-left: 5px solid #4CAF50; }
     .similarity-badge { padding: 3px 6px; border-radius: 5px; color: black; font-weight: 600; display: inline-block; margin-bottom: 6px; }
     .badge-green { background:#C8E6C9; } .badge-yellow { background:#FFF9C4; } .badge-red { background:#FFCDD2; }
     .meta-chip { background:#E0F7FA; padding:2px 6px; margin-right:6px; border-radius:8px; display:inline-block; font-size:0.85em; }
@@ -124,7 +127,6 @@ def db_engine_mysql() -> Optional[Engine]:
         st.error("Credenciais do banco de dados (MySQL) ausentes.")
         st.stop()
     try:
-        # Otimização: Aumentar o pool_recycle pode ajudar a manter conexões vivas.
         engine = create_engine(
             f"mysql+mysqlconnector://{db_params['user']}:{db_params['password']}@{db_params['host']}/{db_params['name']}",
             pool_pre_ping=True, pool_recycle=3600
@@ -174,7 +176,7 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         doc_ref.set(log_entry)
     except Exception as e:
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
-        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="�")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
 
 
 # =============================================================================
@@ -368,8 +370,6 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
         carregar_dados_mysql.clear(); criar_grupos_de_duplicatas.clear(); st.rerun()
 
     st.sidebar.header("⚙️ Parâmetros de Similaridade")
-    # Nota: O valor padrão é definido em DEFAULTS, mas pode ser sobrescrito
-    # por um arquivo secrets.toml na seção [similarity] com a chave min_sim_global.
     sim_cfg = st.secrets.get("similarity", {})
     min_sim_default = int(sim_cfg.get("min_sim_global", DEFAULTS["min_sim_global"]))
     min_sim = st.sidebar.slider("Similaridade Mínima Global (%)", 0, 100, min_sim_default, 1) / 100.0
@@ -416,28 +416,19 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
     if not group_rows:
         return ""
 
-    # Filtramos explicitamente as atividades canceladas.
-    # Elas só serão consideradas se não houver nenhuma outra opção.
     active_candidates = [r for r in group_rows if "Cancelad" not in r.get("activity_status", "")]
-
-    # Se todas as atividades no grupo já estiverem canceladas, retorne a mais recente.
     if not active_candidates:
         return group_rows[0]['activity_id']
 
-    # Dentro dos candidatos ativos, separamos por prioridade.
-    # Prioridade 1: Atividades já finalizadas (Fechada, Concluída, etc.)
     closed_candidates = [r for r in active_candidates if r.get("activity_status") != "Aberta"]
-    # Prioridade 2: Atividades abertas (que queremos cancelar)
     open_candidates = [r for r in active_candidates if r.get("activity_status") == "Aberta"]
 
-    # A lista de candidatos para o cálculo agora prioriza os fechados e ignora os cancelados.
     candidates = closed_candidates + open_candidates
-    if not candidates: # Fallback caso algo dê errado
+    if not candidates:
         return group_rows[0]['activity_id']
 
     best_id, max_avg_score = None, -1.0
     
-    # O restante da lógica de cálculo de score permanece a mesma
     cache = {r['activity_id']: (normalize_for_match(r.get('Texto', ''), []), extract_meta(r.get('Texto', ''))) for r in group_rows}
 
     for candidate in candidates:
@@ -457,8 +448,6 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
         if best_id is None or avg_score > max_avg_score:
             max_avg_score, best_id = avg_score, candidate_id
         
-        # Otimização: se já temos um principal 'fechado', não precisamos continuar
-        # avaliando os 'abertos', pois eles têm prioridade menor.
         if candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
             break
             
@@ -474,26 +463,42 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
 
     principal = next((r for r in group_rows if r["activity_id"] == state["principal_id"]), group_rows[0])
     
-    open_count = sum(1 for r in group_rows if r.get('activity_status') == 'Aberta')
-    expander_title = (f"Grupo: {len(group_rows)} itens ({open_count} Abertas) | Pasta: {pasta} | Principal Sugerido: #{state['principal_id']}")
+    # ALTERAÇÃO: Lógica de filtragem e ordenação movida para dentro da função de renderização
+    
+    # 1. Filtra os itens a serem exibidos com base no modo estrito
+    if params['strict_only']:
+        p_norm = normalize_for_match(principal.get("Texto", ""), [])
+        p_meta = extract_meta(principal.get("Texto", ""))
+        visible_rows = [principal]
+        for row in group_rows:
+            if row["activity_id"] == principal["activity_id"]: continue
+            r_norm = normalize_for_match(row.get("Texto", ""), [])
+            r_meta = extract_meta(row.get("Texto", ""))
+            score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+            if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
+                visible_rows.append(row)
+    else:
+        visible_rows = group_rows
+
+    # 2. Reordena a lista para garantir que o principal venha primeiro
+    display_rows = sorted(visible_rows, key=lambda r: r["activity_id"] != principal["activity_id"])
+
+    open_count = sum(1 for r in display_rows if r.get('activity_status') == 'Aberta')
+    expander_title = (f"Grupo: {len(display_rows)} itens ({open_count} Abertas) | Pasta: {pasta} | Principal Sugerido: #{state['principal_id']}")
     
     with st.expander(expander_title):
-        log_details = {
-            "group_id": group_id,
-            "pasta": pasta,
-            "previous_principal_id": state["principal_id"],
-        }
+        log_details = {"group_id": group_id, "pasta": pasta, "principal_id": state["principal_id"]}
         cols = st.columns([1/3, 1/3, 1/3])
         if cols[0].button("⭐ Recalcular Principal", key=f"recalc_princ_{group_id}", use_container_width=True):
             best_id = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
-            log_details.update({"new_principal_id": best_id, "method": "automatic_recalc"})
+            log_details.update({"previous_principal_id": state["principal_id"], "new_principal_id": best_id, "method": "automatic_recalc"})
             log_action_to_firestore(db_firestore, user, "set_principal", log_details); 
             state["principal_id"] = best_id; state["open_compare"] = None; st.rerun()
         
         if cols[1].button("🗑️ Marcar Todos p/ Cancelar", key=f"cancel_all_{group_id}", use_container_width=True):
-            ids_to_cancel = {r['activity_id'] for r in group_rows if r['activity_id'] != state['principal_id']}
+            ids_to_cancel = {r['activity_id'] for r in display_rows if r['activity_id'] != state['principal_id']}
             state['cancelados'].update(ids_to_cancel)
-            log_details.update({"principal_id": state["principal_id"], "cancelled_ids": list(ids_to_cancel)})
+            log_details.update({"cancelled_ids": list(ids_to_cancel)})
             log_action_to_firestore(db_firestore, user, "mark_all_cancel", log_details); st.rerun()
         
         if cols[2].button("👍 Não é Duplicado", key=f"not_dup_{group_id}", use_container_width=True):
@@ -502,7 +507,7 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
             log_action_to_firestore(db_firestore, user, "mark_not_duplicate", log_details); st.rerun()
         st.markdown("---")
 
-        for row in group_rows:
+        for row in display_rows:
             rid = row["activity_id"]; is_principal = (rid == state["principal_id"]); is_comparing = (rid == state["open_compare"]); is_marked_for_cancel = (rid in state["cancelados"])
             card_class = "card card-principal" if is_principal else "card card-cancelado" if is_marked_for_cancel else "card"
             
@@ -532,7 +537,7 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                     log_details_row = log_details.copy()
                     if not is_principal:
                         if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
-                            log_details_row.update({"new_principal_id": rid, "method": "manual"})
+                            log_details_row.update({"previous_principal_id": state["principal_id"], "new_principal_id": rid, "method": "manual"})
                             log_action_to_firestore(db_firestore, user, "set_principal", log_details_row); 
                             state["principal_id"] = rid; state["open_compare"] = None; st.rerun()
                         if st.button("⚖️ Comparar com Principal", key=f"cmp_{rid}", use_container_width=True):
@@ -542,7 +547,7 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                         cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
                         if cancel_checked != is_marked_for_cancel:
                             action = "mark_cancel" if cancel_checked else "unmark_cancel"
-                            log_details_row.update({"principal_id": state["principal_id"], "target_activity_id": rid})
+                            log_details_row.update({"target_activity_id": rid})
                             log_action_to_firestore(db_firestore, user, action, log_details_row)
                             if cancel_checked: state["cancelados"].add(rid)
                             else: state["cancelados"].discard(rid)
@@ -781,7 +786,6 @@ def main():
     if params["only_groups_with_open"]:
         filtered_groups = [g for g in filtered_groups if any(r.get("activity_status") == "Aberta" for r in g)]
     
-    # ALTERAÇÃO: Lógica do Modo Estrito movida para a filtragem principal
     if params["strict_only"]:
         strictly_filtered_groups = []
         for group in filtered_groups:
@@ -790,18 +794,16 @@ def main():
             p_norm = normalize_for_match(principal.get("Texto", ""), [])
             p_meta = extract_meta(principal.get("Texto", ""))
             
-            visible_rows = [principal]
+            visible_rows_count = 1 # Começa contando o principal
             for row in group:
                 if row["activity_id"] == principal_id: continue
                 r_norm = normalize_for_match(row.get("Texto", ""), [])
                 r_meta = extract_meta(row.get("Texto", ""))
                 score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
                 if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
-                    visible_rows.append(row)
+                    visible_rows_count += 1
             
-            # Apenas adiciona o grupo se houver mais de um item após a filtragem estrita
-            if len(visible_rows) > 1:
-                # Passa o grupo original para render_group, que irá re-filtrar para exibição
+            if visible_rows_count > 1:
                 strictly_filtered_groups.append(group)
         filtered_groups = strictly_filtered_groups
 
@@ -818,7 +820,6 @@ def main():
         st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(filtered_groups))} de {len(filtered_groups)}")
 
         for group in filtered_groups[start_idx:end_idx]:
-            # A função render_group agora recebe o grupo original e aplicará a lógica de exibição internamente
             render_group(group, params, db_firestore)
 
         st.markdown("---"); st.header("⚡ Ações em Massa")
