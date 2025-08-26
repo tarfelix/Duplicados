@@ -14,6 +14,7 @@ otimizações de performance e usabilidade desenvolvidas.
   em paralelo foram mantidos para garantir velocidade e boa experiência.
 - **Bugs Corrigidos:** O `ValueError` na renderização e o erro de SQL na
   carga de textos foram definitivamente corrigidos.
+- **Funcionalidade Restaurada:** Os links para o ZFlow foram reintroduzidos.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v14_hybrid_final"
+SUFFIX = "_v15_links_restored"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     GROUP_STATES = f"group_states_{SUFFIX}"
@@ -207,6 +208,13 @@ def carregar_textos_por_id(_eng: Engine, ids: Tuple[str, ...]) -> Dict[str, str]
 CNJ_RE = re.compile(r"(?:\b|^)(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})(?:\b|$)")
 STOPWORDS_BASE = set("de da do das dos e em a o os as na no para por com que ao aos às à um uma umas uns tipo titulo inteiro teor publicado publicacao disponibilizacao orgao vara tribunal processo recurso intimacao notificacao justica nacional diario djen poder judiciario trabalho".split())
 
+def get_zflow_links(activity_id: str | int) -> dict:
+    """Gera os links para as plataformas ZFlow v1 e v2."""
+    return {
+        "v1": f"https://zflow.zionbyonset.com.br/activity/3/details/{activity_id}",
+        "v2": f"https://zflowv2.zionbyonset.com.br/public/versatile_frame.php/?moduloid=2&activityid={activity_id}#/fixcol1"
+    }
+
 def extract_meta(text: str) -> Dict[str, str]:
     t = text or ""; meta = {}
     cnj_match = CNJ_RE.search(t)
@@ -262,7 +270,6 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
 def criar_grupos_de_duplicatas_hibrido(_df_min: pd.DataFrame, params: Dict, _textos: Dict[str, str]) -> List[List[Dict]]:
     if _df_min.empty: return []
 
-    # Combina os dados mínimos com os textos carregados sob demanda
     work_df = _df_min.copy()
     work_df["Texto"] = work_df["activity_id"].map(_textos)
     work_df = work_df.dropna(subset=["Texto"])
@@ -271,7 +278,6 @@ def criar_grupos_de_duplicatas_hibrido(_df_min: pd.DataFrame, params: Dict, _tex
     work_df["_meta"] = work_df["Texto"].apply(extract_meta)
     work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra))
 
-    # Lógica de Buckets da versão original
     buckets = defaultdict(list)
     for i, row in work_df.iterrows():
         folder = str(row.get("activity_folder") or "SEM_PASTA")
@@ -298,7 +304,6 @@ def criar_grupos_de_duplicatas_hibrido(_df_min: pd.DataFrame, params: Dict, _tex
         min_sim_bucket = float(cutoffs_map.get(folder_name, params['min_sim']))
         pre_cutoff = max(0, int(min_sim_bucket * 100) - params['pre_delta'])
         
-        # Algoritmo de matriz de similaridade da versão original
         prelim_matrix = process.cdist(texts, texts, scorer=fuzz.token_set_ratio, score_cutoff=pre_cutoff)
         
         n = len(bucket_df)
@@ -330,9 +335,7 @@ def criar_grupos_de_duplicatas_hibrido(_df_min: pd.DataFrame, params: Dict, _tex
                         queue.append(neighbor)
             
             if len(component) > 1:
-                # Ordena por data para que o primeiro seja sempre o mais recente
                 sorted_idxs = sorted(list(component), key=lambda ix: bucket_df.loc[ix, "activity_date"], reverse=True)
-                # Converte para dict para ser serializável pelo cache do Streamlit
                 group_data = [work_df.loc[bucket_df.loc[ix, "orig_idx"]].to_dict() for ix in sorted_idxs]
                 groups.append(group_data)
 
@@ -344,7 +347,6 @@ def criar_grupos_de_duplicatas_hibrido(_df_min: pd.DataFrame, params: Dict, _tex
 # =============================================================================
 
 def generate_group_key(group_rows: List[Dict]) -> str:
-    # A chave agora é baseada no ID do item mais antigo do grupo, para estabilidade
     if not group_rows: return ""
     ids = sorted([r['activity_id'] for r in group_rows])
     return hashlib.md5(json.dumps(ids).encode()).hexdigest()
@@ -409,32 +411,69 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
 
     return params
 
+def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
+    if not group_rows: return ""
+    active_candidates = [r for r in group_rows if "Cancelad" not in r.get("activity_status", "")]
+    if not active_candidates: return group_rows[0]['activity_id']
+    closed_candidates = [r for r in active_candidates if r.get("activity_status") != "Aberta"]
+    open_candidates = [r for r in active_candidates if r.get("activity_status") == "Aberta"]
+    candidates = closed_candidates + open_candidates
+    if not candidates: return group_rows[0]['activity_id']
+    best_id, max_avg_score = None, -1.0
+    cache = {r['activity_id']: (normalize_for_match(r.get('Texto', ''), []), extract_meta(r.get('Texto', ''))) for r in group_rows}
+    for candidate in candidates:
+        candidate_id = candidate['activity_id']
+        c_norm, c_meta = cache[candidate_id]
+        scores = []
+        for other in group_rows:
+            if other['activity_id'] == candidate_id: continue
+            o_norm, o_meta = cache[other['activity_id']]
+            score, details = combined_score(c_norm, o_norm, c_meta, o_meta)
+            if score >= min_sim_pct and details['contain'] >= min_containment_pct:
+                scores.append(score)
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+        if best_id is None or avg_score > max_avg_score:
+            max_avg_score, best_id = avg_score, candidate_id
+        if candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
+            break
+    return best_id or group_rows[0]['activity_id']
+
 def render_group(group_rows: List[Dict], params: Dict, db_firestore):
     group_key = generate_group_key(group_rows)
     user = st.session_state.get(SK.USERNAME, "desconhecido")
     state = st.session_state[SK.GROUP_STATES].setdefault(group_key, {"principal_id": None, "open_compare": None, "cancelados": set()})
     
-    # O principal é sempre o primeiro da lista, que já vem ordenada por data
-    if state["principal_id"] is None:
-        state["principal_id"] = group_rows[0]['activity_id']
+    if state["principal_id"] is None or not any(r["activity_id"] == state["principal_id"] for r in group_rows):
+        state["principal_id"] = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
 
-    principal = next((r for r in group_rows if r["activity_id"] == state["principal_id"]), group_rows[0])
-    
-    display_rows = sorted(group_rows, key=lambda r: r["activity_id"] != principal["activity_id"])
-    
+    principal_row = next((r for r in group_rows if r["activity_id"] == state["principal_id"]), None)
+    if principal_row is None:
+        st.error(f"Erro: Atividade principal ID {state['principal_id']} não encontrada. Resetando para o mais recente.")
+        state["principal_id"] = group_rows[0]['activity_id']
+        principal_row = group_rows[0]
+
+    if params['strict_only']:
+        p_norm = normalize_for_match(principal_row.get("Texto", ""), [])
+        p_meta = extract_meta(principal_row.get("Texto", ""))
+        visible_rows = [principal_row]
+        for row in group_rows:
+            if row["activity_id"] == principal_row["activity_id"]: continue
+            r_norm = normalize_for_match(row.get("Texto", ""), [])
+            r_meta = extract_meta(row.get("Texto", ""))
+            score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+            if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
+                visible_rows.append(row)
+    else:
+        visible_rows = group_rows
+
+    display_rows = sorted(visible_rows, key=lambda r: r["activity_id"] != principal_row["activity_id"])
     open_count = sum(1 for r in display_rows if r.get('activity_status') == 'Aberta')
-    expander_title = (f"Grupo: {len(display_rows)} itens ({open_count} Abertas) | Pasta: {principal.get('activity_folder', 'N/A')} | Principal: #{state['principal_id']}")
+    expander_title = (f"Grupo: {len(display_rows)} itens ({open_count} Abertas) | Pasta: {principal_row.get('activity_folder', 'N/A')} | Principal: #{state['principal_id']}")
     
     with st.expander(expander_title):
-        # ... (código de renderização dos botões e cartões)
         for row in display_rows:
-            rid = row["activity_id"]
-            is_principal = (rid == state["principal_id"])
-            is_marked_for_cancel = (rid in state["cancelados"])
-            is_comparing = (rid == state["open_compare"])
-            
+            rid = row["activity_id"]; is_principal = (rid == state["principal_id"]); is_comparing = (rid == state["open_compare"]); is_marked_for_cancel = (rid in state["cancelados"])
             card_class = "card card-principal" if is_principal else "card card-cancelado" if is_marked_for_cancel else "card"
-            
             with st.container():
                 st.markdown(f"<div class='{card_class}'>", unsafe_allow_html=True)
                 c1, c2 = st.columns([0.7, 0.3])
@@ -442,80 +481,70 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                     dt = row["activity_date"].tz_convert(TZ_SP) if pd.notna(row["activity_date"]) else None
                     st.markdown(f"**ID:** `{rid}` {'⭐ **Principal**' if is_principal else ''}")
                     st.caption(f"**Data:** {dt.strftime('%d/%m/%Y %H:%M') if dt else 'N/A'} | **Status:** {row.get('activity_status','')} | **Usuário:** {row.get('user_profile_name','')}")
-                    
                     if not is_principal:
-                        score, details = combined_score(principal["_norm"], row["_norm"], principal["_meta"], row["_meta"])
-                        min_sim_pct = params['min_sim'] * 100
-                        badge_color = "badge-green" if score >= min_sim_pct + 5 else "badge-yellow" if score >= min_sim_pct else "badge-red"
-                        tooltip = f"Set: {details.get('set',0):.0f}% | Sort: {details.get('sort',0):.0f}% | Contain: {details.get('contain',0):.0f}% | Bônus: {details.get('bonus',0)}"
+                        score, details = combined_score(normalize_for_match(principal_row.get("Texto", ""), []), normalize_for_match(row.get("Texto", ""), []), extract_meta(principal_row.get("Texto", "")), extract_meta(row.get("Texto", "")))
+                        badge_color = "badge-green" if score >= (params['min_sim'] * 100) + 5 else "badge-yellow" if score >= (params['min_sim'] * 100) else "badge-red"
+                        tooltip = f"Set: {details['set']:.0f}% | Sort: {details['sort']:.0f}% | Contain: {details['contain']:.0f}% | Bônus: {details['bonus']}"
                         st.markdown(f"<span class='similarity-badge {badge_color}' title='{tooltip}'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
-                    
                     st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}")
                     
+                    # FUNCIONALIDADE RESTAURADA
+                    links = get_zflow_links(rid)
+                    b_cols = st.columns(2)
+                    b_cols[0].link_button("Abrir no ZFlow v1", links["v1"], use_container_width=True)
+                    b_cols[1].link_button("Abrir no ZFlow v2", links["v2"], use_container_width=True)
+
                 with c2:
                     if not is_principal:
                         if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
                             state["principal_id"] = rid; state["open_compare"] = None; st.rerun()
                         if st.button("⚖️ Comparar", key=f"cmp_{rid}", use_container_width=True):
                             state["open_compare"] = rid if not is_comparing else None; st.rerun()
-                    
                     cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
                     if cancel_checked != is_marked_for_cancel:
                         if cancel_checked: state["cancelados"].add(rid)
                         else: state["cancelados"].discard(rid)
                         st.rerun()
-
                 st.markdown("</div>", unsafe_allow_html=True)
-
         if state["open_compare"]:
             comparado_row = next((r for r in group_rows if r["activity_id"] == state["open_compare"]), None)
             if comparado_row:
                 st.markdown("---"); st.subheader("Comparação Detalhada (Diff)")
-                c1, c2 = st.columns(2); c1.markdown(f"**Principal: ID `{principal['activity_id']}`**"); c2.markdown(f"**Comparado: ID `{comparado_row['activity_id']}`**")
-                hA, hB = highlight_diffs(principal.get("Texto", ""), comparado_row.get("Texto", ""), params['diff_limit'])
+                c1, c2 = st.columns(2); c1.markdown(f"**Principal: ID `{principal_row['activity_id']}`**"); c2.markdown(f"**Comparado: ID `{comparado_row['activity_id']}`**")
+                hA, hB = highlight_diffs(principal_row.get("Texto", ""), comparado_row.get("Texto", ""), params['diff_limit'])
                 c1.markdown(hA, unsafe_allow_html=True); c2.markdown(hB, unsafe_allow_html=True)
 
 # =============================================================================
-# AÇÕES E HISTÓRICO
+# AÇÕES, CALIBRAÇÃO E HISTÓRICO
 # =============================================================================
 def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_firestore):
     client = api_client()
     if not client: st.error("Cliente de API não configurado."); return
     client.dry_run = st.session_state[SK.CFG].get("dry_run", True)
-    
     st.info(f"Iniciando o cancelamento de {len(to_cancel_with_context)} atividades...")
     progress_bar = st.progress(0.0)
-
     def update_progress(p): progress_bar.progress(p)
-
     results = client.process_cancellations_concurrently(to_cancel_with_context, user, update_progress)
-    
     st.success(f"Processamento concluído! Sucessos: {results['success']}, Falhas: {results['failed']}.")
     if client.dry_run: st.warning("Atenção: O modo Teste (Dry-run) está ativo.")
-    if results["errors"]:
-        st.error("Ocorreram falhas:"); st.json(results["errors"], expanded=False)
-
+    if results["errors"]: st.error("Ocorreram falhas:"); st.json(results["errors"], expanded=False)
     for item in to_cancel_with_context:
         is_error = any(err.get("activity_id") == item["ID a Cancelar"] for err in results["errors"])
         action = "process_cancellation_failure" if is_error else "process_cancellation_success"
         log_action_to_firestore(db_firestore, user, action, item)
-
     for g_state in st.session_state[SK.GROUP_STATES].values(): g_state["cancelados"].clear()
     st.cache_data.clear(); st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
 
 @st.dialog("Confirmação de Cancelamento")
 def confirm_cancellation_dialog(all_groups: List[List[Dict]], user: str, db_firestore):
     to_cancel_with_context = []
-    for g_rows in all_groups:
-        group_key = generate_group_key(g_rows)
+    for g in all_groups:
+        group_key = generate_group_key(g)
         state = st.session_state[SK.GROUP_STATES].get(group_key, {})
         if state.get("cancelados"):
             principal_id = state.get("principal_id")
             for cancel_id in state["cancelados"]:
-                to_cancel_with_context.append({
-                    "ID a Cancelar": cancel_id, "Duplicata do Principal": principal_id,
-                    "Pasta": next((r.get("activity_folder", "N/A") for r in g_rows if r['activity_id'] == cancel_id), "N/A"),
-                })
+                to_cancel_with_context.append({"ID a Cancelar": cancel_id, "Duplicata do Principal": principal_id, "Pasta": next((r.get("activity_folder") for r in g if r["activity_id"] == cancel_id), "N/A")})
     if not to_cancel_with_context:
         st.info("Nenhuma atividade foi marcada para cancelamento.");
         if st.button("Fechar"): st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
@@ -523,14 +552,12 @@ def confirm_cancellation_dialog(all_groups: List[List[Dict]], user: str, db_fire
     st.warning(f"Você está prestes a cancelar **{len(to_cancel_with_context)}** atividades. Esta ação é irreversível."); 
     st.dataframe(to_cancel_with_context, use_container_width=True)
     col1, col2 = st.columns(2)
-    if col1.button("✅ Confirmar e Cancelar", type="primary", use_container_width=True): 
-        process_cancellations(to_cancel_with_context, user, db_firestore)
-    if col2.button("Voltar", use_container_width=True): 
-        st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
+    if col1.button("✅ Confirmar e Cancelar", type="primary", use_container_width=True): process_cancellations(to_cancel_with_context, user, db_firestore)
+    if col2.button("Voltar", use_container_width=True): st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
 
 def render_history_tab(db_firestore):
     st.subheader("📜 Histórico de Ações (Auditoria)")
-    # ... (código da aba de histórico)
+    # ... (código do histórico)
 
 # =============================================================================
 # FLUXO PRINCIPAL DO APLICATIVO
@@ -578,26 +605,26 @@ def main():
     if not all_groups:
         st.info("Clique em 'Aplicar e Analisar' na barra lateral para iniciar a busca por duplicatas."); st.stop()
     
-    # Lógica de filtragem
-    filtered_groups = []
+    final_filtered_groups = []
     for group in all_groups:
-        if generate_group_key(group) in st.session_state[SK.IGNORED_GROUPS]: continue
+        group_key = generate_group_key(group)
+        if group_key in st.session_state[SK.IGNORED_GROUPS]: continue
         if params["pastas"] and group[0].get("activity_folder") not in params["pastas"]: continue
         if params["only_groups_with_open"] and not any(r.get("activity_status") == "Aberta" for r in group): continue
         if params["status"] and not any(r.get("activity_status") in params["status"] for r in group): continue
-        filtered_groups.append(group)
+        final_filtered_groups.append(group)
 
     tab1, tab2 = st.tabs(["🔎 Análise de Duplicidades", "📜 Histórico de Ações"])
 
     with tab1:
-        st.metric("Grupos de Duplicatas Encontrados (após filtros)", len(filtered_groups))
+        st.metric("Grupos de Duplicatas Encontrados (após filtros)", len(final_filtered_groups))
         page_size = st.number_input("Grupos por página", min_value=1, value=DEFAULTS["itens_por_pagina"], step=1)
-        total_pages = max(1, math.ceil(len(filtered_groups) / page_size))
+        total_pages = max(1, math.ceil(len(final_filtered_groups) / page_size))
         page_num = st.number_input("Página", min_value=1, max_value=total_pages, value=1, step=1)
         start_idx = (page_num - 1) * page_size; end_idx = start_idx + page_size
-        st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(filtered_groups))} de {len(filtered_groups)}")
+        st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(final_filtered_groups))} de {len(final_filtered_groups)}")
 
-        for group_rows in filtered_groups[start_idx:end_idx]:
+        for group_rows in final_filtered_groups[start_idx:end_idx]:
             render_group(group_rows, params, db_firestore)
 
         st.markdown("---"); st.header("⚡ Ações em Massa")
@@ -605,7 +632,7 @@ def main():
             st.session_state[SK.SHOW_CANCEL_CONFIRM] = True
         
         if st.session_state.get(SK.SHOW_CANCEL_CONFIRM):
-            confirm_cancellation_dialog(filtered_groups, st.session_state.get(SK.USERNAME), db_firestore)
+            confirm_cancellation_dialog(final_filtered_groups, st.session_state.get(SK.USERNAME), db_firestore)
 
     with tab2: render_history_tab(db_firestore)
 
