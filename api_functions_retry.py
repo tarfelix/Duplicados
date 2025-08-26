@@ -1,25 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-Módulo Cliente HTTP com Resiliência
-===================================
+Módulo Cliente HTTP com Resiliência (Otimizado)
+===============================================
 
 Este módulo fornece uma classe, HttpClientRetry, para interagir com a API de
 cancelamento de atividades. Ele implementa funcionalidades essenciais para
-garantir a robustez das operações:
+garantir a robustez das operações.
 
-- Tentativas Automáticas (Retries): Tenta novamente em caso de falhas de rede
-  ou erros temporários do servidor (5xx).
-- Backoff Exponencial: Aumenta o tempo de espera entre as tentativas para não
-  sobrecarregar a API.
-- Limite de Taxa (Rate Limiting): Controla o número de chamadas por segundo
-  para respeitar os limites da API.
-- Modo de Teste (Dry Run): Permite simular as chamadas de API sem realizar
-  modificações reais, útil para validação e testes.
+Melhorias nesta versão:
+- O Rate Limiter é desativado durante o modo de teste (Dry Run) para acelerar
+  a validação e os testes.
+- Adicionada concorrência opcional para lidar com múltiplas chamadas de forma
+  mais eficiente.
 """
 import requests
 import time
 import logging
 from typing import Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class HttpClientRetry:
     def __init__(self,
@@ -61,7 +59,13 @@ class HttpClientRetry:
         }
 
     def _rate_limit(self):
-        """Garante que o número de chamadas por segundo não seja excedido."""
+        """
+        Garante que o número de chamadas por segundo não seja excedido.
+        Otimização: Ignora o limite em modo dry_run.
+        """
+        if self.dry_run:
+            return
+            
         if self.min_interval > 0:
             elapsed = time.time() - self.last_call_ts
             if elapsed < self.min_interval:
@@ -85,26 +89,20 @@ class HttpClientRetry:
                     json=json_data,
                     timeout=self.timeout
                 )
-                # Lança uma exceção para erros HTTP (4xx, 5xx)
                 response.raise_for_status()
-                # Se a resposta for bem-sucedida, retorna o JSON
                 return response.json()
             
             except requests.exceptions.HTTPError as e:
-                # Para erros de cliente (4xx), não adianta tentar novamente.
                 if 400 <= e.response.status_code < 500:
                     logging.error(f"Erro de cliente ({e.response.status_code}) na chamada para {url}. Não haverá nova tentativa. Resposta: {e.response.text}")
                     return {"ok": False, "success": False, "error": f"Client Error: {e.response.status_code}", "message": e.response.text}
-                # Para erros de servidor (5xx), fazemos retry.
                 logging.warning(f"Erro de servidor ({e.response.status_code}) na tentativa {attempt + 1}/{self.max_attempts} para {url}.")
             
             except requests.exceptions.RequestException as e:
-                # Para outros erros de rede (timeout, conexão, etc.)
                 logging.warning(f"Erro de conexão na tentativa {attempt + 1}/{self.max_attempts} para {url}: {e}")
 
-            # Se não for a última tentativa, espera antes de tentar novamente (backoff)
             if attempt < self.max_attempts - 1:
-                wait_time = (2 ** attempt)  # 1s, 2s, 4s...
+                wait_time = (2 ** attempt)
                 time.sleep(wait_time)
 
         logging.error(f"Todas as {self.max_attempts} tentativas falharam para a requisição {method} {url}.")
@@ -122,7 +120,6 @@ class HttpClientRetry:
         Returns:
             dict: A resposta da API ou um dicionário de simulação em caso de dry_run.
         """
-        # Monta a mensagem de observação personalizada
         observation_message = (
             f"Cancelado pelo instrumento de verificar duplicado por {user_name}. "
             f"Atividade duplicada da principal ID {principal_id}."
@@ -130,7 +127,9 @@ class HttpClientRetry:
 
         if self.dry_run:
             logging.info(f"[DRY-RUN] Simulado o cancelamento da atividade ID: {activity_id} com a observação: '{observation_message}'")
-            return {"ok": True, "success": True, "message": "Dry run mode", "code": "200"}
+            # Simula uma pequena latência de rede
+            time.sleep(0.1)
+            return {"ok": True, "success": True, "message": "Dry run mode", "code": "200", "activity_id": activity_id}
 
         endpoint = f"activity/{self.entity_id}/activitycanceledduplicate"
         body = {
@@ -138,18 +137,66 @@ class HttpClientRetry:
             "id": activity_id,
             "activity_type_id": 152,
             "user_name": user_name,
-            "observation": observation_message  # Adiciona a observação ao corpo da requisição
+            "observation": observation_message
         }
         
         response = self._make_request(method="PUT", endpoint=endpoint, json_data=body)
         
-        # Garante que sempre retornamos um dict com estado de sucesso
         if response is None:
-            return {"ok": False, "success": False, "error": "Max retries exceeded"}
+            return {"ok": False, "success": False, "error": "Max retries exceeded", "activity_id": activity_id}
             
-        # A API pode retornar 'ok' ou 'success', então normalizamos
         if "ok" not in response and "success" not in response:
             response["ok"] = False
             response["success"] = False
-            
+        
+        response["activity_id"] = activity_id
         return response
+
+    def process_cancellations_concurrently(self, items_to_cancel: list[dict], user_name: str, progress_callback=None, max_workers=4) -> dict:
+        """
+        Processa uma lista de cancelamentos de forma concorrente.
+
+        Args:
+            items_to_cancel (list[dict]): Lista de dicionários, cada um com 'ID a Cancelar' e 'Duplicata do Principal'.
+            user_name (str): Nome do usuário para registrar na API.
+            progress_callback (callable, optional): Função para reportar o progresso (recebe float de 0.0 a 1.0).
+            max_workers (int): Número máximo de threads para as chamadas de API.
+
+        Returns:
+            dict: Um resumo dos resultados com 'success', 'failed' e uma lista de 'errors'.
+        """
+        results = {"success": 0, "failed": 0, "errors": []}
+        total_items = len(items_to_cancel)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self.activity_canceled,
+                    item["ID a Cancelar"],
+                    user_name,
+                    item["Duplicata do Principal"]
+                ): item for item in items_to_cancel
+            }
+
+            for i, future in enumerate(as_completed(futures)):
+                try:
+                    response = future.result()
+                    if response and (response.get("ok") or response.get("success")):
+                        results["success"] += 1
+                    else:
+                        results["failed"] += 1
+                        results["errors"].append(response)
+                except Exception as e:
+                    item = futures[future]
+                    results["failed"] += 1
+                    error_details = {
+                        "activity_id": item["ID a Cancelar"],
+                        "error": "Exception",
+                        "message": str(e)
+                    }
+                    results["errors"].append(error_details)
+                
+                if progress_callback:
+                    progress_callback((i + 1) / total_items)
+        
+        return results
