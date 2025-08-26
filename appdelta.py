@@ -66,7 +66,6 @@ except ImportError:
 
 # Importações do Firebase para auditoria
 try:
-
     import firebase_admin
     from firebase_admin import credentials, firestore
 except ImportError:
@@ -82,18 +81,17 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v12_optimized"
+SUFFIX = "_v12_optimized_fix"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     GROUP_STATES = f"group_states_{SUFFIX}"
     CFG = f"cfg_{SUFFIX}"
     SHOW_CANCEL_CONFIRM = f"show_cancel_confirm_{SUFFIX}"
     IGNORED_GROUPS = f"ignored_groups_{SUFFIX}"
-    ANALYSIS_RESULTS = f"analysis_results_{SUFFIX}" # Cache para os resultados da análise
+    ANALYSIS_RESULTS = f"analysis_results_{SUFFIX}"
 
 DEFAULTS = {
     "itens_por_pagina": 5,
-    "dias_filtro_inicio": 7,
     "min_sim_global": 95,
     "min_containment": 55,
     "pre_cutoff_delta": 10,
@@ -115,7 +113,6 @@ st.markdown("""
     .card-principal { background-color: #E8F5E9; border-left: 5px solid #4CAF50; }
     .similarity-badge { padding: 3px 6px; border-radius: 5px; color: black; font-weight: 600; display: inline-block; margin-bottom: 6px; }
     .badge-green { background:#C8E6C9; } .badge-yellow { background:#FFF9C4; } .badge-red { background:#FFCDD2; }
-    .meta-chip { background:#E0F7FA; padding:2px 6px; margin-right:6px; border-radius:8px; display:inline-block; font-size:0.85em; }
     .small-muted { color:#777; font-size:0.85em; }
 </style>
 """, unsafe_allow_html=True)
@@ -126,7 +123,6 @@ st.markdown("""
 
 @st.cache_resource
 def db_engine_mysql() -> Optional[Engine]:
-    # ... (código de conexão com o banco, sem alterações)
     cfg = st.secrets.get("database", {})
     db_params = {k: cfg.get(k) for k in ["host", "user", "password", "name"]}
     if not all(db_params.values()):
@@ -142,10 +138,8 @@ def db_engine_mysql() -> Optional[Engine]:
     except exc.SQLAlchemyError as e:
         logging.exception(e); st.error(f"Erro ao conectar no banco (MySQL): {e}"); st.stop()
 
-
 @st.cache_resource
 def api_client() -> Optional[HttpClientRetry]:
-    # ... (código do cliente de API, sem alterações)
     if HttpClientRetry is None: return None
     api_cfg = st.secrets.get("api", {})
     client_cfg = st.secrets.get("api_client", {})
@@ -159,10 +153,8 @@ def api_client() -> Optional[HttpClientRetry]:
         timeout=int(client_cfg.get("timeout", 20)), dry_run=bool(client_cfg.get("dry_run", False))
     )
 
-
 @st.cache_resource
 def init_firebase():
-    # ... (código de inicialização do Firebase, sem alterações)
     if not firebase_admin: return None
     try:
         if not firebase_admin._apps:
@@ -179,7 +171,6 @@ def init_firebase():
         st.sidebar.error(f"Falha ao conectar no Firebase: {e}."); return None
 
 def log_action_to_firestore(db, user: str, action: str, details: Dict):
-    # ... (código de log, sem alterações)
     if db is None: return
     try:
         doc_ref = db.collection("duplicidade_actions").document()
@@ -189,17 +180,12 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
         st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
 
-
 # =============================================================================
 # CARREGAMENTO E PRÉ-PROCESSAMENTO DE DADOS (OTIMIZADO)
 # =============================================================================
 
 @st.cache_data(ttl=1800)
 def carregar_dados_minimos(_eng: Engine, dias_historico: int) -> pd.DataFrame:
-    """
-    Otimização 1: Carrega apenas os metadados (sem o campo 'Texto').
-    Otimização 2: Usa uma query "sargable" (activity_date >= :limite).
-    """
     limite = datetime.now() - timedelta(days=dias_historico)
     query = text("""
         SELECT activity_id, activity_folder, user_profile_name, activity_date, activity_status
@@ -220,15 +206,19 @@ def carregar_dados_minimos(_eng: Engine, dias_historico: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def carregar_textos_por_id(_eng: Engine, ids: Tuple[str, ...]) -> Dict[str, str]:
-    """
-    Otimização: Busca os textos completos sob demanda para um conjunto de IDs.
-    """
     if not ids: return {}
-    # CORREÇÃO: Usa o parameter style ":name" que o SQLAlchemy expande corretamente para cláusulas IN.
-    query = text("SELECT activity_id, Texto FROM ViewGrdAtividadesTarcisio WHERE activity_id IN :ids")
+    
+    # CORREÇÃO ROBUSTA: Constrói a query com placeholders individuais para cada ID.
+    # Isso evita problemas de expansão de parâmetros em diferentes drivers de BD.
+    params = {f"id_{i}": id_val for i, id_val in enumerate(ids)}
+    param_names = [f":{key}" for key in params.keys()]
+    
+    query_string = f"SELECT activity_id, Texto FROM ViewGrdAtividadesTarcisio WHERE activity_id IN ({', '.join(param_names)})"
+    query = text(query_string)
+    
     try:
         with _eng.connect() as conn:
-            df_textos = pd.read_sql(query, conn, params={"ids": ids})
+            df_textos = pd.read_sql(query, conn, params=params)
         return pd.Series(df_textos.Texto.values, index=df_textos.activity_id.astype(str)).to_dict()
     except exc.SQLAlchemyError as e:
         logging.exception(e); st.error(f"Erro ao buscar textos: {e}"); return {}
@@ -237,13 +227,9 @@ def carregar_textos_por_id(_eng: Engine, ids: Tuple[str, ...]) -> Dict[str, str]
 # LÓGICA DE SIMILARIDADE E FUNÇÕES AUXILIARES
 # =============================================================================
 CNJ_RE = re.compile(r"(?:\b|^)(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})(?:\b|$)")
-URL_RE = re.compile(r"https?://\S+")
-DATENUM_RE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
-NUM_RE = re.compile(r"\b\d+\b")
 STOPWORDS_BASE = set("de da do das dos e em a o os as na no para por com que ao aos às à um uma umas uns tipo titulo inteiro teor publicado publicacao disponibilizacao orgao vara tribunal processo recurso intimacao notificacao justica nacional diario djen poder judiciario trabalho".split())
 
 def extract_meta(text: str) -> Dict[str, str]:
-    # ... (lógica de extração, sem alterações)
     t = text or ""; meta = {}
     cnj_match = CNJ_RE.search(t)
     cnj = cnj_match.group(1) if cnj_match else None
@@ -260,19 +246,20 @@ def extract_meta(text: str) -> Dict[str, str]:
         if match: meta[key] = match.group(1).strip() if key != "vara" else match.group(0).strip()
     return meta
 
-
 def normalize_for_match(text: str, stopwords_extra: List[str]) -> str:
-    # ... (lógica de normalização, sem alterações)
     if not isinstance(text, str): return ""
-    t = URL_RE.sub(" url ", text); t = CNJ_RE.sub(" numproc ", t); t = DATENUM_RE.sub(" data ", t)
-    t = NUM_RE.sub(" # ", t); t = unidecode(t.lower()); t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"https?://\S+", " url ", text)
+    t = CNJ_RE.sub(" numproc ", t)
+    t = re.sub(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b", " data ", t)
+    t = re.sub(r"\b\d+\b", " # ", t)
+    t = unidecode(t.lower())
+    t = re.sub(r"[^\w\s]", " ", t)
     all_stopwords = STOPWORDS_BASE.union(stopwords_extra)
     return " ".join([w for w in t.split() if w not in all_stopwords])
 
-
 def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict[str,str]) -> Tuple[float, Dict[str,float]]:
-    # ... (lógica de score, sem alterações)
-    set_ratio = fuzz.token_set_ratio(a_norm, b_norm); sort_ratio = fuzz.token_sort_ratio(a_norm, b_norm)
+    set_ratio = fuzz.token_set_ratio(a_norm, b_norm)
+    sort_ratio = fuzz.token_sort_ratio(a_norm, b_norm)
     
     a_tokens, b_tokens = a_norm.split(), b_norm.split()
     if not a_tokens or not b_tokens: return 0.0, {}
@@ -293,24 +280,13 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
     details = {"set": set_ratio, "sort": sort_ratio, "contain": contain, "len_pen": lp, "bonus": bonus, "base": base_score}
     return final_score, details
 
-
 # =============================================================================
 # LÓGICA DE AGRUPAMENTO (OTIMIZADA)
 # =============================================================================
 
 @st.cache_data(ttl=3600, max_entries=10)
-def criar_grupos_de_duplicatas_otimizado(
-    _df_min: pd.DataFrame, params: Dict, _textos: Dict[str, str]
-) -> List[Dict]:
-    """
-    Otimização completa do pipeline de agrupamento.
-    - Usa "blocking" refinado.
-    - Usa índice invertido para gerar pares candidatos (evita O(n²)).
-    - Constrói um grafo e encontra componentes conectados.
-    - Retorna uma estrutura de dados leve, apenas com IDs e metadados.
-    """
+def criar_grupos_de_duplicatas_otimizado(_df_min: pd.DataFrame, params: Dict, _textos: Dict[str, str]) -> List[Dict]:
     if _df_min.empty: return []
-
     work_df = _df_min.copy()
     work_df["Texto"] = work_df["activity_id"].map(_textos)
     work_df = work_df.dropna(subset=["Texto"])
@@ -319,30 +295,26 @@ def criar_grupos_de_duplicatas_otimizado(
     work_df["_meta"] = work_df["Texto"].apply(extract_meta)
     work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_for_match(t, stopwords_extra))
     
-    # Otimização: Chave de bloqueio mais granular
     def get_block_key(row):
         norm_tokens = row["_norm"].split()[:5]
-        # CORREÇÃO: Retorna uma string única, não uma tupla.
+        # CORREÇÃO: Retorna uma string única para ser usada como chave de bucket.
         return f"{row['_meta'].get('tipo_doc', '')}|{' '.join(norm_tokens)}"
 
     work_df["block_key"] = work_df.apply(get_block_key, axis=1)
 
-    # Construção dos buckets
     buckets = defaultdict(list)
     for idx, row in work_df.iterrows():
         folder = str(row.get("activity_folder") or "SEM_PASTA")
         cnj = row.get("_meta", {}).get("processo", "")
         block_key = row["block_key"]
         key = f"folder::{folder}"
-        if params['use_cnj']:
-            key = f"{key}::cnj::{cnj or 'SEM_CNJ'}"
+        if params['use_cnj']: key = f"{key}::cnj::{cnj or 'SEM_CNJ'}"
         key = f"{key}::bk::{block_key}"
         buckets[key].append(idx)
 
     cutoffs_map = st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {})
     groups = []
     
-    # Barra de progresso para o usuário
     progress_bar = st.progress(0, text="Analisando buckets...")
     total_buckets = len(buckets)
 
@@ -350,16 +322,14 @@ def criar_grupos_de_duplicatas_otimizado(
         progress_bar.progress((i + 1) / total_buckets, text=f"Analisando bucket {i+1}/{total_buckets}")
         if len(idxs) < 2: continue
 
-        bucket_df = work_df.loc[idxs].reset_index().rename(columns={"index": "orig_idx"})
+        bucket_df = work_df.loc[idxs].reset_index(drop=True)
         texts = bucket_df["_norm"].tolist()
         n = len(bucket_df)
         
-        # Otimização: Construir grafo de adjacência
         adj = [[] for _ in range(n)]
         min_sim_pct = float(cutoffs_map.get(bucket_df.iloc[0]["activity_folder"], params['min_sim'])) * 100.0
         pre_cutoff = max(0, min_sim_pct - params['pre_delta'])
         
-        # Otimização: Índice invertido para gerar pares candidatos
         token_index = defaultdict(list)
         for doc_id, text in enumerate(texts):
             for token in set(text.split()):
@@ -369,15 +339,10 @@ def criar_grupos_de_duplicatas_otimizado(
             candidates = set()
             for token in set(texts[doc_id1].split()):
                 for doc_id2 in token_index[token]:
-                    if doc_id1 < doc_id2:
-                        candidates.add(doc_id2)
+                    if doc_id1 < doc_id2: candidates.add(doc_id2)
             
             for doc_id2 in candidates:
-                # Pré-corte com um scorer rápido
-                if fuzz.token_set_ratio(texts[doc_id1], texts[doc_id2]) < pre_cutoff:
-                    continue
-
-                # Score completo apenas para os pares promissores
+                if fuzz.token_set_ratio(texts[doc_id1], texts[doc_id2]) < pre_cutoff: continue
                 score, details = combined_score(
                     bucket_df.loc[doc_id1, "_norm"], bucket_df.loc[doc_id2, "_norm"],
                     bucket_df.loc[doc_id1, "_meta"], bucket_df.loc[doc_id2, "_meta"]
@@ -386,29 +351,23 @@ def criar_grupos_de_duplicatas_otimizado(
                     adj[doc_id1].append(doc_id2)
                     adj[doc_id2].append(doc_id1)
 
-        # Encontrar componentes conectados (grupos)
         visited = [False] * n
         for i in range(n):
             if not visited[i]:
-                component = []
+                component_indices = []
                 q = [i]
                 visited[i] = True
                 while q:
                     u = q.pop(0)
-                    component.append(u)
+                    component_indices.append(u)
                     for v in adj[u]:
                         if not visited[v]:
                             visited[v] = True
                             q.append(v)
                 
-                if len(component) > 1:
-                    group_idxs = [bucket_df.loc[ix, "orig_idx"] for ix in component]
-                    group_df = work_df.loc[group_idxs]
-                    
-                    # Determinar principal (mais recente)
+                if len(component_indices) > 1:
+                    group_df = bucket_df.iloc[component_indices]
                     principal_id = group_df.sort_values("activity_date", ascending=False).iloc[0]["activity_id"]
-                    
-                    # Pré-calcular scores em relação ao principal
                     principal_row = group_df[group_df["activity_id"] == principal_id].iloc[0]
                     
                     members = []
@@ -434,17 +393,14 @@ def criar_grupos_de_duplicatas_otimizado(
     progress_bar.empty()
     return groups
 
-
 # =============================================================================
 # COMPONENTES DE UI E RENDERIZAÇÃO (OTIMIZADO)
 # =============================================================================
 
 def generate_group_key(ids: List[str]) -> str:
-    """Otimização: Cria uma chave de grupo estável baseada nos IDs dos membros."""
     return hashlib.md5(json.dumps(sorted(ids)).encode()).hexdigest()
 
 def highlight_diffs(a: str, b: str, hard_limit: int) -> Tuple[str,str]:
-    # ... (lógica de diff, com limite integrado)
     t1, t2 = (a or ""), (b or "")
     if (len(t1) + len(t2)) > hard_limit:
         note = f"<div class='small-muted'>⚠️ Diff truncado em {hard_limit // 2} caracteres por texto.</div>"
@@ -453,6 +409,7 @@ def highlight_diffs(a: str, b: str, hard_limit: int) -> Tuple[str,str]:
         note = ""
 
     tokens1 = [tok for tok in re.split(r'(\W+)', t1) if tok]; tokens2 = [tok for tok in re.split(r'(\W+)', t2) if tok]
+    from difflib import SequenceMatcher
     sm = SequenceMatcher(None, tokens1, tokens2, autojunk=False); out1, out2 = [], []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         s1, s2 = html.escape("".join(tokens1[i1:i2])), html.escape("".join(tokens2[j1:j2]))
@@ -462,9 +419,7 @@ def highlight_diffs(a: str, b: str, hard_limit: int) -> Tuple[str,str]:
         elif tag == 'insert': out2.append(f"<span class='diff-ins'>{s2}</span>")
     return (f"{note}<pre class='highlighted-text'>{''.join(out1)}</pre>", f"{note}<pre class='highlighted-text'>{''.join(out2)}</pre>")
 
-
 def sidebar_controls(df_full: pd.DataFrame) -> Dict:
-    # ... (sidebar, agora com st.form)
     st.sidebar.header("👤 Sessão"); username = st.session_state.get(SK.USERNAME, "Não logado")
     st.sidebar.success(f"Logado como: **{username}**")
     if st.sidebar.button("🔄 Forçar Atualização dos Dados"):
@@ -473,12 +428,10 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
     params = {}
     with st.sidebar.form(key='params_form'):
         st.header("⚙️ Parâmetros de Análise")
-        sim_cfg = st.secrets.get("similarity", {})
         min_sim = st.slider("Similaridade Mínima Global (%)", 0, 100, DEFAULTS["min_sim_global"], 1) / 100.0
         min_containment = st.slider("Containment Mínimo (%)", 0, 100, DEFAULTS["min_containment"], 1)
         pre_delta = st.slider("Delta do Pré-corte", 0, 30, DEFAULTS["pre_cutoff_delta"], 1)
         use_cnj = st.toggle("Restringir por Nº do Processo (CNJ)", value=True)
-        
         analysis_submitted = st.form_submit_button("🚀 Aplicar e Analisar", type="primary")
 
     params.update({
@@ -509,7 +462,6 @@ def sidebar_controls(df_full: pd.DataFrame) -> Dict:
 
     return params
 
-
 def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firestore):
     group_key = group_info["group_key"]
     user = st.session_state.get(SK.USERNAME, "desconhecido")
@@ -517,7 +469,6 @@ def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firesto
         "principal_id": group_info["principal_id"], "open_compare": None, "cancelados": set()
     })
 
-    # Filtro de "Modo Estrito"
     min_sim_pct = params['min_sim'] * 100
     min_containment_pct = params['min_containment']
     
@@ -531,16 +482,14 @@ def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firesto
     else:
         visible_member_ids.update([m["activity_id"] for m in group_info["members"]])
 
-    if len(visible_member_ids) < 2: return # Não é um grupo de duplicatas visível
+    if len(visible_member_ids) < 2: return
 
-    # Ordena para exibir: principal primeiro, depois por data
     display_rows_data = sorted(
         [full_data_map[mid] for mid in visible_member_ids if mid in full_data_map],
         key=lambda r: (r["activity_id"] != state["principal_id"], r["activity_date"]),
         reverse=True
     )
     
-    # Adiciona os scores aos dados de exibição
     member_scores = {m["activity_id"]: m for m in group_info["members"]}
     for row in display_rows_data:
         row.update(member_scores.get(row["activity_id"], {}))
@@ -549,30 +498,21 @@ def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firesto
     expander_title = (f"Grupo: {len(display_rows_data)} itens ({open_count} Abertas) | Pasta: {group_info['activity_folder']} | Principal: #{state['principal_id']}")
     
     with st.expander(expander_title):
-        log_details = {"group_key": group_key, "pasta": group_info['activity_folder'], "principal_id": state["principal_id"]}
-        
-        # Ações rápidas no cabeçalho
         cols = st.columns([1, 1, 1, 1])
         if cols[0].button("⭐ Redefinir Principal (Mais Recente)", key=f"recalc_princ_{group_key}", use_container_width=True):
-            state["principal_id"] = group_info["principal_id"]
-            st.rerun()
-
+            state["principal_id"] = group_info["principal_id"]; st.rerun()
         if cols[1].button("🗑️ Marcar Todos p/ Cancelar", key=f"cancel_all_{group_key}", use_container_width=True):
             ids_to_cancel = {r['activity_id'] for r in display_rows_data if r['activity_id'] != state['principal_id']}
-            state['cancelados'].update(ids_to_cancel)
-            st.rerun()
-        
+            state['cancelados'].update(ids_to_cancel); st.rerun()
         if cols[2].button("👍 Não é Duplicado", key=f"not_dup_{group_key}", use_container_width=True):
-            st.session_state[SK.IGNORED_GROUPS].add(group_key)
-            st.rerun()
-        
+            st.session_state[SK.IGNORED_GROUPS].add(group_key); st.rerun()
         if cols[3].button("✅ Principal + Cancelar Resto", key=f"one_shot_{group_key}", use_container_width=True, type="primary"):
-            state["cancelados"] = {r["activity_id"] for r in display_rows_data if r["activity_id"] != state["principal_id"]}
-            st.rerun()
+            state["cancelados"] = {r["activity_id"] for r in display_rows_data if r["activity_id"] != state["principal_id"]}; st.rerun()
 
         st.markdown("---")
-
-        principal_row = full_data_map[state["principal_id"]]
+        principal_row = full_data_map.get(state["principal_id"])
+        if not principal_row: 
+            st.error("Erro: Atividade principal não encontrada nos dados da página."); return
 
         for row in display_rows_data:
             rid = row["activity_id"]; is_principal = (rid == state["principal_id"]); is_comparing = (rid == state["open_compare"]); is_marked_for_cancel = (rid in state["cancelados"])
@@ -602,7 +542,6 @@ def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firesto
                         if st.button("⚖️ Comparar", key=f"cmp_{rid}", use_container_width=True):
                             state["open_compare"] = rid if not is_comparing else None; st.rerun()
                     
-                    # Ação rápida de cancelamento
                     cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
                     if cancel_checked != is_marked_for_cancel:
                         if cancel_checked: state["cancelados"].add(rid)
@@ -619,9 +558,8 @@ def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firesto
                 hA, hB = highlight_diffs(principal_row.get("Texto", ""), comparado_row.get("Texto", ""), params['diff_limit'])
                 c1.markdown(hA, unsafe_allow_html=True); c2.markdown(hB, unsafe_allow_html=True)
 
-
 # =============================================================================
-# AÇÕES, CALIBRAÇÃO E HISTÓRICO
+# AÇÕES E HISTÓRICO
 # =============================================================================
 def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_firestore):
     client = api_client()
@@ -631,18 +569,15 @@ def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_fire
     st.info(f"Iniciando o cancelamento de {len(to_cancel_with_context)} atividades...")
     progress_bar = st.progress(0.0)
 
-    def update_progress(p):
-        progress_bar.progress(p)
+    def update_progress(p): progress_bar.progress(p)
 
     results = client.process_cancellations_concurrently(to_cancel_with_context, user, update_progress)
     
     st.success(f"Processamento concluído! Sucessos: {results['success']}, Falhas: {results['failed']}.")
     if client.dry_run: st.warning("Atenção: O modo Teste (Dry-run) está ativo.")
     if results["errors"]:
-        st.error("Ocorreram falhas:")
-        st.json(results["errors"], expanded=False)
+        st.error("Ocorreram falhas:"); st.json(results["errors"], expanded=False)
 
-    # Log e limpeza
     for item in to_cancel_with_context:
         is_error = any(err.get("activity_id") == item["ID a Cancelar"] for err in results["errors"])
         action = "process_cancellation_failure" if is_error else "process_cancellation_success"
@@ -650,7 +585,6 @@ def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_fire
 
     for g_state in st.session_state[SK.GROUP_STATES].values(): g_state["cancelados"].clear()
     st.cache_data.clear(); st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
-
 
 @st.dialog("Confirmação de Cancelamento")
 def confirm_cancellation_dialog(all_groups: List[Dict], user: str, db_firestore):
@@ -662,8 +596,7 @@ def confirm_cancellation_dialog(all_groups: List[Dict], user: str, db_firestore)
             principal_id = state.get("principal_id")
             for cancel_id in state["cancelados"]:
                 to_cancel_with_context.append({
-                    "ID a Cancelar": cancel_id,
-                    "Duplicata do Principal": principal_id,
+                    "ID a Cancelar": cancel_id, "Duplicata do Principal": principal_id,
                     "Pasta": g_info.get("activity_folder", "N/A"),
                 })
     if not to_cancel_with_context:
@@ -678,13 +611,10 @@ def confirm_cancellation_dialog(all_groups: List[Dict], user: str, db_firestore)
     if col2.button("Voltar", use_container_width=True): 
         st.session_state[SK.SHOW_CANCEL_CONFIRM] = False; st.rerun()
 
-
 def render_history_tab(db_firestore):
     st.subheader("📜 Histórico de Ações (Auditoria)")
-    if db_firestore is None:
-        st.warning("A conexão com o Firebase (auditoria) não está ativa."); return
+    if db_firestore is None: st.warning("A conexão com o Firebase (auditoria) não está ativa."); return
 
-    # Otimização: Filtros de data
     col1, col2 = st.columns(2)
     start_date = col1.date_input("De", date.today() - timedelta(days=7))
     end_date = col2.date_input("Até", date.today())
@@ -697,37 +627,26 @@ def render_history_tab(db_firestore):
             query = db_firestore.collection("duplicidade_actions") \
                 .where("ts", ">=", start_dt.astimezone(TZ_UTC)) \
                 .where("ts", "<=", end_dt.astimezone(TZ_UTC)) \
-                .order_by("ts", direction=firestore.Query.DESCENDING) \
-                .limit(500)
-            
-            history = [doc.to_dict() for doc in query.stream()]
-            st.session_state['history_cache'] = history
+                .order_by("ts", direction=firestore.Query.DESCENDING).limit(500)
+            st.session_state['history_cache'] = [doc.to_dict() for doc in query.stream()]
         except Exception as e:
-            st.error(f"Erro ao buscar histórico: {e}")
-            st.session_state['history_cache'] = []
+            st.error(f"Erro ao buscar histórico: {e}"); st.session_state['history_cache'] = []
     
     history = st.session_state.get('history_cache', [])
-    if not history:
-        st.info("Nenhum registro encontrado para o período. Clique em 'Buscar Histórico'."); return
+    if not history: st.info("Nenhum registro encontrado para o período. Clique em 'Buscar Histórico'."); return
     
-    # ... (lógica de exibição e exportação do histórico, sem grandes alterações)
-    df_friendly = pd.DataFrame(history) # Simplificado para exemplo
-    st.dataframe(df_friendly)
-
+    st.dataframe(pd.DataFrame(history))
 
 # =============================================================================
 # FLUXO PRINCIPAL DO APLICATIVO
 # =============================================================================
 def main():
     st.title(APP_TITLE)
-    # Inicialização do session_state
     for key in [SK.USERNAME, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM, SK.IGNORED_GROUPS, SK.ANALYSIS_RESULTS]:
         if key not in st.session_state:
             st.session_state[key] = set() if key == SK.IGNORED_GROUPS else {} if key in [SK.GROUP_STATES, SK.ANALYSIS_RESULTS] else False
 
-    # Login
     if not st.session_state.get(SK.USERNAME):
-        # ... (lógica de login, sem alterações)
         with st.sidebar.form("login_form"):
             username = st.text_input("Nome de Usuário"); password = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar"):
@@ -743,7 +662,6 @@ def main():
     
     params = sidebar_controls(df_full)
     
-    # Filtra em memória para a janela de análise
     data_limite_analise = datetime.now(TZ_UTC) - timedelta(days=params["dias_hist"])
     df_analysis = df_full[df_full['activity_date'] >= data_limite_analise].copy()
 
@@ -761,16 +679,13 @@ def main():
     
     all_groups = st.session_state[SK.ANALYSIS_RESULTS]
     if not all_groups:
-        st.info("Clique em 'Aplicar e Analisar' na barra lateral para iniciar a busca por duplicatas.")
-        st.stop()
+        st.info("Clique em 'Aplicar e Analisar' na barra lateral para iniciar a busca por duplicatas."); st.stop()
     
-    # Lógica de filtragem de exibição
     filtered_groups = []
     for group in all_groups:
         if group["group_key"] in st.session_state[SK.IGNORED_GROUPS]: continue
         if params["pastas"] and group.get("activity_folder") not in params["pastas"]: continue
         if params["only_groups_with_open"] and not group.get("has_open_activity"): continue
-        # Adicionar filtro de status se necessário
         filtered_groups.append(group)
 
     tab1, tab2 = st.tabs(["🔎 Análise de Duplicidades", "📜 Histórico de Ações"])
@@ -783,7 +698,6 @@ def main():
         start_idx = (page_num - 1) * page_size; end_idx = start_idx + page_size
         st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(filtered_groups))} de {len(filtered_groups)}")
 
-        # Fetch de dados completos apenas para a página atual
         ids_on_page = []
         for g in filtered_groups[start_idx:end_idx]:
             ids_on_page.extend([m["activity_id"] for m in g["members"]])
