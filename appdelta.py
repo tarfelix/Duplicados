@@ -66,6 +66,7 @@ except ImportError:
 
 # Importações do Firebase para auditoria
 try:
+
     import firebase_admin
     from firebase_admin import credentials, firestore
 except ImportError:
@@ -223,6 +224,7 @@ def carregar_textos_por_id(_eng: Engine, ids: Tuple[str, ...]) -> Dict[str, str]
     Otimização: Busca os textos completos sob demanda para um conjunto de IDs.
     """
     if not ids: return {}
+    # CORREÇÃO: Usa o parameter style ":name" que o SQLAlchemy expande corretamente para cláusulas IN.
     query = text("SELECT activity_id, Texto FROM ViewGrdAtividadesTarcisio WHERE activity_id IN :ids")
     try:
         with _eng.connect() as conn:
@@ -272,9 +274,6 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
     # ... (lógica de score, sem alterações)
     set_ratio = fuzz.token_set_ratio(a_norm, b_norm); sort_ratio = fuzz.token_sort_ratio(a_norm, b_norm)
     
-    # Otimização: token_containment é custoso, calcula apenas se necessário.
-    # A lógica de agrupamento usará um pré-corte mais simples.
-    # Para a UI, calculamos o score completo.
     a_tokens, b_tokens = a_norm.split(), b_norm.split()
     if not a_tokens or not b_tokens: return 0.0, {}
     small, big = (a_tokens, set(b_tokens)) if len(a_tokens) <= len(b_tokens) else (b_tokens, set(a_tokens))
@@ -323,7 +322,8 @@ def criar_grupos_de_duplicatas_otimizado(
     # Otimização: Chave de bloqueio mais granular
     def get_block_key(row):
         norm_tokens = row["_norm"].split()[:5]
-        return (row["_meta"].get("tipo_doc", ""), " ".join(norm_tokens))
+        # CORREÇÃO: Retorna uma string única, não uma tupla.
+        return f"{row['_meta'].get('tipo_doc', '')}|{' '.join(norm_tokens)}"
 
     work_df["block_key"] = work_df.apply(get_block_key, axis=1)
 
@@ -535,7 +535,7 @@ def render_group(group_info: Dict, full_data_map: Dict, params: Dict, db_firesto
 
     # Ordena para exibir: principal primeiro, depois por data
     display_rows_data = sorted(
-        [full_data_map[mid] for mid in visible_member_ids],
+        [full_data_map[mid] for mid in visible_member_ids if mid in full_data_map],
         key=lambda r: (r["activity_id"] != state["principal_id"], r["activity_date"]),
         reverse=True
     )
