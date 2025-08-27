@@ -11,7 +11,7 @@ PRINCIPAIS MELHORIAS:
 - **Performance Extrema (CPU & I/O):**
   - **Lazy Loading de Textos:** Carrega textos do banco de dados sob demanda,
     apenas para os buckets em análise, reduzindo drasticamente a carga inicial.
-  - **Paralelismo Massivo:** Utiliza todos os núcleos da CPU (`workers=-1`) для
+  - **Paralelismo Massivo:** Utiliza todos os núcleos da CPU (`workers=-1`) para
     o cálculo de similaridade, acelerando a análise em até 10x.
   - **Cache Centralizado:** Normalização e extração de metadados são feitas
     uma única vez por texto, eliminando recálculos redundantes.
@@ -347,8 +347,8 @@ def combined_score(norm_a: str, meta_a: Dict, tokens_a: Set[str], norm_b: str, m
     if not tokens_a or not tokens_b: return 0.0, {}
     
     # Containment otimizado com sets
-    small_set, big_set = (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b) else (tokens_b, tokens_a)
-    contain = 100.0 * (len(small_set.intersection(big_set)) / len(small_set))
+    if not tokens_a: return 0.0, {} # Evita divisão por zero
+    contain = 100.0 * (len(tokens_a.intersection(tokens_b)) / len(tokens_a))
 
     len_a, len_b = len(norm_a), len(norm_b)
     lp = max(0.9, 1.0 - (abs(len_a - len_b) / max(len_a, len_b)) * 0.1) if len_a > 0 and len_b > 0 else 0.9
@@ -490,12 +490,19 @@ def criar_grupos_de_duplicatas_otimizado(df_min: pd.DataFrame, params: Dict, eng
         group_rows = group_rows.sort_values("activity_date", ascending=False).to_dict('records')
         
         # Pré-cálculo de scores
+        if not group_rows: continue
         principal_row = group_rows[0]
         pid = principal_row['activity_id']
+        if pid not in norm_meta_map: continue
         p_norm, p_meta, p_tokens = norm_meta_map[pid]
         
         for row in group_rows:
             rid = row['activity_id']
+            if rid not in norm_meta_map:
+                row['score_vs_principal'] = 0.0
+                row['details_vs_principal'] = {}
+                continue
+
             if rid == pid:
                 row['score_vs_principal'] = 100.0
                 row['details_vs_principal'] = {}
@@ -648,18 +655,19 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore, engine: Eng
                         tooltip = f"Set: {details.get('set',0):.0f}% | Sort: {details.get('sort',0):.0f}% | Contain: {details.get('contain',0):.0f}% | Bônus: {details.get('bonus',0)}"
                         date_alert_icon = "⚠️" if details.get("date_alert") else ""
                         st.markdown(f"<span class='similarity-badge {badge_color}' title='{tooltip}'>Similaridade: {score:.0f}% {date_alert_icon}</span>", unsafe_allow_html=True)
-                    st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}")
+                    # CORREÇÃO: Chave única para cada widget
+                    st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{group_key}_{rid}")
                     links = get_zflow_links(rid)
                     b_cols = st.columns(2)
                     b_cols[0].link_button("Abrir no ZFlow v1", links["v1"], use_container_width=True)
                     b_cols[1].link_button("Abrir no ZFlow v2", links["v2"], use_container_width=True)
                 with c2:
                     if not is_principal:
-                        if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
+                        if st.button("⭐ Tornar Principal", key=f"mkp_{group_key}_{rid}", use_container_width=True):
                             state["principal_id"] = rid; state["open_compare"] = None; st.rerun()
-                        if st.button("⚖️ Comparar", key=f"cmp_{rid}", use_container_width=True):
+                        if st.button("⚖️ Comparar", key=f"cmp_{group_key}_{rid}", use_container_width=True):
                             state["open_compare"] = rid if not is_comparing else None; st.rerun()
-                    cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
+                    cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{group_key}_{rid}")
                     if cancel_checked != is_marked_for_cancel:
                         if cancel_checked: state["cancelados"].add(rid)
                         else: state["cancelados"].discard(rid)
