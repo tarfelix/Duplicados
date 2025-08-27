@@ -11,7 +11,7 @@ PRINCIPAIS MELHORIAS:
 - **Performance Extrema (CPU & I/O):**
   - **Lazy Loading de Textos:** Carrega textos do banco de dados sob demanda,
     apenas para os buckets em análise, reduzindo drasticamente a carga inicial.
-  - **Paralelismo Massivo:** Utiliza todos os núcleos da CPU (`workers=-1`) para
+  - **Paralelismo Massivo:** Utiliza todos os núcleos da CPU (`workers=-1`) для
     o cálculo de similaridade, acelerando a análise em até 10x.
   - **Cache Centralizado:** Normalização e extração de metadados são feitas
     uma única vez por texto, eliminando recálculos redundantes.
@@ -841,9 +841,16 @@ def render_history_tab(db_firestore):
 # =============================================================================
 def main():
     st.title(APP_TITLE)
+    # Inicialização do session_state
     for key in [SK.USERNAME, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM, SK.IGNORED_GROUPS, SK.ANALYSIS_RESULTS, SK.FIRST_RUN_COMPLETE]:
         if key not in st.session_state:
-            st.session_state[key] = set() if key == SK.IGNORED_GROUPS else {} if key in [SK.GROUP_STATES, SK.ANALYSIS_RESULTS] else False
+            # CORREÇÃO: SK.CFG agora é inicializado como um dicionário
+            if key in [SK.GROUP_STATES, SK.ANALYSIS_RESULTS, SK.CFG]:
+                st.session_state[key] = {}
+            elif key == SK.IGNORED_GROUPS:
+                st.session_state[key] = set()
+            else:
+                st.session_state[key] = False
 
     if not st.session_state.get(SK.USERNAME):
         with st.sidebar.form("login_form"):
