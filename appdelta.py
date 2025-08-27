@@ -22,6 +22,8 @@ otimizações de performance e usabilidade desenvolvidas.
       diferentes e exibindo um alerta visual.
     - **Ocultação de Grupos Resolvidos:** Grupos são ocultados apenas se
       restar uma (ou nenhuma) atividade não cancelada.
+    - **Filtro de "Abertas" Corrigido:** A lógica de filtragem agora considera
+      corretamente o "Modo Estrito" antes de aplicar outros filtros de status.
 """
 from __future__ import annotations
 
@@ -77,7 +79,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v21_final_cancel_logic"
+SUFFIX = "_v22_filter_fix"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     GROUP_STATES = f"group_states_{SUFFIX}"
@@ -763,14 +765,24 @@ def main():
         group_key = generate_group_key(group)
         if group_key in st.session_state[SK.IGNORED_GROUPS]: continue
         
-        # LÓGICA CORRIGIDA: Oculta o grupo apenas se restar 1 ou 0 atividades não canceladas.
-        non_canceled_count = sum(1 for r in group if "Cancelad" not in r.get("activity_status", ""))
-        if non_canceled_count <= 1:
-            continue
-
-        if params["pastas"] and group[0].get("activity_folder") not in params["pastas"]: continue
-        if params["only_groups_with_open"] and not any(r.get("activity_status") == "Aberta" for r in group): continue
-        if params["status"] and not any(r.get("activity_status") in params["status"] for r in group): continue
+        # CORREÇÃO: Lógica de filtragem robusta que considera o "Modo Estrito" antes de outros filtros.
+        rows_to_check = group
+        if params['strict_only']:
+            principal_id = get_best_principal_id(group, params['min_sim'] * 100, params['min_containment'])
+            principal = next((r for r in group if r["activity_id"] == principal_id), group[0])
+            p_norm = principal["_norm"]; p_meta = principal["_meta"]
+            visible_rows = [principal]
+            for row in group:
+                if row["activity_id"] == principal["activity_id"]: continue
+                score, details = combined_score(p_norm, row["_norm"], p_meta, row["_meta"])
+                if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
+                    visible_rows.append(row)
+            if len(visible_rows) < 2: continue
+            rows_to_check = visible_rows
+        
+        if params["only_groups_with_open"] and not any(r.get("activity_status") == "Aberta" for r in rows_to_check): continue
+        if params["status"] and not any(r.get("activity_status") in params["status"] for r in rows_to_check): continue
+        
         final_filtered_groups.append(group)
 
     tab1, tab2, tab3 = st.tabs(["🔎 Análise de Duplicidades", "📊 Calibração", "📜 Histórico de Ações"])
