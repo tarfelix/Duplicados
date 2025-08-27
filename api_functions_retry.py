@@ -10,8 +10,8 @@ garantir a robustez das operações.
 Melhorias nesta versão:
 - O Rate Limiter é desativado durante o modo de teste (Dry Run) para acelerar
   a validação e os testes.
-- Adicionada concorrência opcional para lidar com múltiplas chamadas de forma
-  mais eficiente.
+- A verificação de sucesso da API foi tornada mais flexível para evitar
+  falsos negativos no log.
 """
 import requests
 import time
@@ -127,7 +127,6 @@ class HttpClientRetry:
 
         if self.dry_run:
             logging.info(f"[DRY-RUN] Simulado o cancelamento da atividade ID: {activity_id} com a observação: '{observation_message}'")
-            # Simula uma pequena latência de rede
             time.sleep(0.1)
             return {"ok": True, "success": True, "message": "Dry run mode", "code": "200", "activity_id": activity_id}
 
@@ -145,58 +144,11 @@ class HttpClientRetry:
         if response is None:
             return {"ok": False, "success": False, "error": "Max retries exceeded", "activity_id": activity_id}
             
-        if "ok" not in response and "success" not in response:
-            response["ok"] = False
-            response["success"] = False
+        # CORREÇÃO: Lógica de sucesso mais flexível para evitar falsos negativos.
+        # Considera sucesso se 'ok' ou 'success' for True, ou se 'code' for '200'.
+        is_success = response.get("ok", False) or response.get("success", False) or str(response.get("code")) == "200"
+        response["ok"] = is_success
+        response["success"] = is_success
         
         response["activity_id"] = activity_id
         return response
-
-    def process_cancellations_concurrently(self, items_to_cancel: list[dict], user_name: str, progress_callback=None, max_workers=4) -> dict:
-        """
-        Processa uma lista de cancelamentos de forma concorrente.
-
-        Args:
-            items_to_cancel (list[dict]): Lista de dicionários, cada um com 'ID a Cancelar' e 'Duplicata do Principal'.
-            user_name (str): Nome do usuário para registrar na API.
-            progress_callback (callable, optional): Função para reportar o progresso (recebe float de 0.0 a 1.0).
-            max_workers (int): Número máximo de threads para as chamadas de API.
-
-        Returns:
-            dict: Um resumo dos resultados com 'success', 'failed' e uma lista de 'errors'.
-        """
-        results = {"success": 0, "failed": 0, "errors": []}
-        total_items = len(items_to_cancel)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    self.activity_canceled,
-                    item["ID a Cancelar"],
-                    user_name,
-                    item["Duplicata do Principal"]
-                ): item for item in items_to_cancel
-            }
-
-            for i, future in enumerate(as_completed(futures)):
-                try:
-                    response = future.result()
-                    if response and (response.get("ok") or response.get("success")):
-                        results["success"] += 1
-                    else:
-                        results["failed"] += 1
-                        results["errors"].append(response)
-                except Exception as e:
-                    item = futures[future]
-                    results["failed"] += 1
-                    error_details = {
-                        "activity_id": item["ID a Cancelar"],
-                        "error": "Exception",
-                        "message": str(e)
-                    }
-                    results["errors"].append(error_details)
-                
-                if progress_callback:
-                    progress_callback((i + 1) / total_items)
-        
-        return results
