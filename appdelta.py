@@ -77,7 +77,7 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 TZ_UTC = ZoneInfo("UTC")
 
 # Chaves para o session_state do Streamlit
-SUFFIX = "_v20_resolved_logic_fix"
+SUFFIX = "_v21_final_cancel_logic"
 class SK:
     USERNAME = f"username_{SUFFIX}"
     GROUP_STATES = f"group_states_{SUFFIX}"
@@ -578,7 +578,9 @@ def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_fire
         ids_to_check.append(act_id)
         try:
             response = client.activity_canceled(activity_id=act_id, user_name=user, principal_id=principal_id)
-            if response and (response.get("ok") or response.get("success")):
+            # CORREÇÃO: Lógica de sucesso robusta para tratar a resposta da API
+            is_success = response and (response.get("ok") or response.get("success") or str(response.get("code")) == "200")
+            if is_success:
                 results["ok"] += 1; log_action_to_firestore(db_firestore, user, "process_cancellation_success", item)
             else:
                 results["err"] += 1; item["api_response"] = response; log_action_to_firestore(db_firestore, user, "process_cancellation_failure", item); st.warning(f"Falha ao cancelar {act_id}. Resposta: {response}")
