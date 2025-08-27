@@ -176,7 +176,7 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
         doc_ref.set(log_entry)
     except Exception as e:
         logging.error(f"Erro ao registrar ação no Firestore: {e}")
-        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="🔥")
+        st.toast(f"⚠️ Erro ao salvar log de auditoria: {e}", icon="�")
 
 # =============================================================================
 # CARREGAMENTO E PRÉ-PROCESSAMENTO DE DADOS (OTIMIZADO)
@@ -765,16 +765,20 @@ def main():
         group_key = generate_group_key(group)
         if group_key in st.session_state[SK.IGNORED_GROUPS]: continue
         
-        # CORREÇÃO: Lógica de filtragem robusta que considera o "Modo Estrito" antes de outros filtros.
+        non_canceled_count = sum(1 for r in group if "Cancelad" not in r.get("activity_status", ""))
+        if non_canceled_count <= 1:
+            continue
+
         rows_to_check = group
         if params['strict_only']:
             principal_id = get_best_principal_id(group, params['min_sim'] * 100, params['min_containment'])
             principal = next((r for r in group if r["activity_id"] == principal_id), group[0])
-            p_norm = principal["_norm"]; p_meta = principal["_meta"]
+            p_norm = normalize_for_match(principal.get("Texto", ""), [])
+            p_meta = extract_meta(principal.get("Texto", ""))
             visible_rows = [principal]
             for row in group:
                 if row["activity_id"] == principal["activity_id"]: continue
-                score, details = combined_score(p_norm, row["_norm"], p_meta, row["_meta"])
+                score, details = combined_score(p_norm, normalize_for_match(row.get("Texto", ""), []), p_meta, extract_meta(row.get("Texto", "")))
                 if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
                     visible_rows.append(row)
             if len(visible_rows) < 2: continue
