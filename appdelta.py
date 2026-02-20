@@ -19,7 +19,7 @@ Funcionalidades Principais:
 """
 from __future__ import annotations
 
-import os
+
 import re
 import html
 import logging
@@ -233,19 +233,48 @@ def log_action_to_firestore(db, user: str, action: str, details: Dict):
 # CARREGAMENTO E PRÉ-PROCESSAMENTO DE DADOS
 # =============================================================================
 
+@st.cache_data(ttl=3600, hash_funcs={Engine: lambda _: None})
+def carregar_opcoes_mysql(_eng: Engine) -> Tuple[List[str], List[str]]:
+    """Carrega apenas os filtros distintos de pastas e status, otimizando o uso de memória."""
+    query_pastas = text("SELECT DISTINCT activity_folder FROM ViewGrdAtividadesTarcisio WHERE activity_type='Verificar' AND activity_folder IS NOT NULL")
+    query_status = text("SELECT DISTINCT activity_status FROM ViewGrdAtividadesTarcisio WHERE activity_type='Verificar' AND activity_status IS NOT NULL")
+    
+    try:
+        with _eng.connect() as conn:
+            pastas = [row[0] for row in conn.execute(query_pastas).fetchall()]
+            status = [row[0] for row in conn.execute(query_status).fetchall()]
+        return sorted(pastas), sorted(status)
+    except exc.SQLAlchemyError as e:
+        logging.exception(e)
+        st.error(f"Erro ao carregar opções do banco: {e}")
+        return [], []
+
 @st.cache_data(ttl=1800, hash_funcs={Engine: lambda _: None})
-def carregar_dados_mysql(_eng: Engine, dias_historico: int) -> pd.DataFrame:
-    """Carrega atividades do banco de dados, incluindo abertas e fechadas recentes."""
+def carregar_dados_mysql(_eng: Engine, dias_historico: int, pastas: List[str] = None, status: List[str] = None) -> pd.DataFrame:
+    """Carrega atividades do banco usando filtros SQL diretamente para evitar Pandas overhead."""
     limite = date.today() - timedelta(days=dias_historico)
-    query = text("""
+    
+    base_query = """
         SELECT activity_id, activity_folder, user_profile_name, activity_date, activity_status, Texto
         FROM ViewGrdAtividadesTarcisio
         WHERE activity_type='Verificar'
           AND (activity_status='Aberta' OR DATE(activity_date) >= :limite)
-    """)
+    """
+    
+    params: Dict[str, Any] = {"limite": limite}
+    
+    if pastas:
+        # SQL in clause builder
+        base_query += " AND activity_folder IN :pastas"
+        params["pastas"] = tuple(pastas)
+        
+    if status:
+        base_query += " AND activity_status IN :status"
+        params["status"] = tuple(status)
+
     try:
         with _eng.connect() as conn:
-            df = pd.read_sql(query, conn, params={"limite": limite})
+            df = pd.read_sql(text(base_query), conn, params=params)
         if df.empty:
             return pd.DataFrame()
         
@@ -335,11 +364,10 @@ def token_containment(a_tokens: List[str], b_tokens: List[str]) -> float:
     return 100.0 * (intersection_count / len(small))
 
 def length_penalty(len_a: int, len_b: int) -> float:
-    """Aplica uma penalidade se os textos tiverem tamanhos muito diferentes."""
-    if len_a == 0 or len_b == 0: return 0.9 # Penalidade alta para texto vazio
+    """Aplica uma penalidade mais agressiva se os textos tiverem tamanhos muito diferentes."""
+    if len_a == 0 or len_b == 0: return 0.7 
     diff_ratio = abs(len_a - len_b) / max(len_a, len_b)
-    # A penalidade é de até 10% (1.0 - diff_ratio * 0.1) e no mínimo 0.9
-    return max(0.9, 1.0 - diff_ratio * 0.1)
+    return max(0.7, 1.0 - diff_ratio * 0.4)
 
 def fields_bonus(meta_a: Dict[str,str], meta_b: Dict[str,str]) -> int:
     """Concede um bônus de pontuação se certos metadados forem idênticos."""
@@ -400,7 +428,7 @@ def criar_grupos_de_duplicatas(df: pd.DataFrame, params: Dict) -> List[List[Dict
     # Cria uma "assinatura" dos parâmetros para invalidar o cache se algo mudar
     cutoffs_tuple = tuple(sorted(st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {}).items()))
     sig = (
-        tuple(sorted(df["activity_id"])),
+        hash(frozenset(df["activity_id"])),
         params['min_sim'], params['min_containment'], params['pre_delta'],
         params['use_cnj'], cutoffs_tuple
     )
@@ -446,20 +474,19 @@ def criar_grupos_de_duplicatas(df: pd.DataFrame, params: Dict) -> List[List[Dict
         visited = set()
         memo_score: Dict[Tuple[int, int], Tuple[float, Dict]] = {}
 
-        def are_connected(i, j) -> bool:
+        def are_connected(row_i_norm, row_i_meta, row_j_norm, row_j_meta, i, j) -> bool:
             """Verifica se dois itens são duplicados usando o score completo."""
             key = tuple(sorted((i, j)))
             if key in memo_score:
                 score, details = memo_score[key]
             else:
-                score, details = combined_score(
-                    bucket_df.loc[i, "_norm"], bucket_df.loc[j, "_norm"],
-                    bucket_df.loc[i, "_meta"], bucket_df.loc[j, "_meta"]
-                )
+                score, details = combined_score(row_i_norm, row_j_norm, row_i_meta, row_j_meta)
                 memo_score[key] = (score, details)
             
-            return details["contain"] >= params['min_containment'] and score >= (min_sim_bucket * 100.0)
+            return details["contain"] >= params['min_containment'] and score >= min_sim_bucket_pct
 
+        min_sim_bucket_pct = min_sim_bucket * 100.0
+        
         for i in range(n):
             if i in visited: continue
             
@@ -469,11 +496,18 @@ def criar_grupos_de_duplicatas(df: pd.DataFrame, params: Dict) -> List[List[Dict
             
             while queue:
                 current_node = queue.popleft()
-                for neighbor in range(n):
-                    if neighbor not in visited and prelim_matrix[current_node][neighbor] >= pre_cutoff and are_connected(current_node, neighbor):
-                        visited.add(neighbor)
-                        component.add(neighbor)
-                        queue.append(neighbor)
+                current_norm = bucket_df.loc[current_node, "_norm"]
+                current_meta = bucket_df.loc[current_node, "_meta"]
+
+                # Otimização com Numpy: busca apenas vizinhos que passaram no pré-corte
+                valid_neighbors = np.where(prelim_matrix[current_node] >= pre_cutoff)[0]
+
+                for neighbor in valid_neighbors:
+                    if neighbor not in visited:
+                        if are_connected(current_norm, current_meta, bucket_df.loc[neighbor, "_norm"], bucket_df.loc[neighbor, "_meta"], current_node, neighbor):
+                            visited.add(neighbor)
+                            component.add(neighbor)
+                            queue.append(neighbor)
             
             if len(component) > 1:
                 # Ordena os membros do grupo por data, do mais recente para o mais antigo
@@ -522,63 +556,55 @@ def highlight_diffs(a: str, b: str) -> Tuple[str,str]:
             out2.append(f"<span class='diff-ins'>{s2}</span>")
     return (f"<pre class='highlighted-text'>{''.join(out1)}</pre>", f"<pre class='highlighted-text'>{''.join(out2)}</pre>")
 
-def sidebar_controls(df_full: pd.DataFrame) -> Dict:
+def sidebar_controls(pastas_opts: List[str], status_opts: List[str]) -> Dict:
     """Renderiza todos os controles da barra lateral e retorna os parâmetros selecionados."""
     st.sidebar.header("👤 Sessão")
     username = st.session_state.get(SK.USERNAME, "Não logado")
     st.sidebar.success(f"Logado como: **{username}**")
-    if st.sidebar.button("🔄 Forçar Atualização dos Dados"):
-        st.session_state.pop(SK.SIMILARITY_CACHE, None)
-        carregar_dados_mysql.clear()
-        st.rerun()
+    
+    col_a, col_b = st.sidebar.columns(2)
+    with col_a:
+        if st.button("🔄 Atualizar"):
+            st.session_state.pop(SK.SIMILARITY_CACHE, None)
+            carregar_dados_mysql.clear()
+            carregar_opcoes_mysql.clear()
+            st.rerun()
+    with col_b:
+        if st.button("🚪 Sair"):
+            st.session_state.pop(SK.USERNAME, None)
+            st.rerun()
 
-    st.sidebar.header("⚙️ Parâmetros de Similaridade")
-    sim_cfg = st.secrets.get("similarity", {})
+    st.sidebar.header("👁️ Filtros Principais")
+    dias_hist = st.sidebar.number_input("Dias de Histórico", min_value=7, max_value=365, value=10, step=1)
     
-    # Controles principais
-    min_sim = st.sidebar.slider("Similaridade Mínima Global (%)", 0, 100, int(sim_cfg.get("min_sim_global", DEFAULTS["min_sim_global"])), 1) / 100.0
-    min_containment = st.sidebar.slider("Containment Mínimo (%)", 0, 100, int(sim_cfg.get("min_containment", DEFAULTS["min_containment"])), 1)
-    pre_delta = st.sidebar.slider("Delta do Pré-corte", 0, 30, int(sim_cfg.get("pre_cutoff_delta", DEFAULTS["pre_cutoff_delta"])), 1, help="Aumentar torna o pré-corte mais agressivo, acelerando o processo mas podendo perder alguns matches.")
-    diff_limit = st.sidebar.number_input("Limite de Caracteres do Diff", min_value=5000, value=int(sim_cfg.get("diff_hard_limit", DEFAULTS["diff_hard_limit"])), step=1000)
-
-    st.sidebar.header("👁️ Filtros de Exibição")
-    # Filtros de data e escopo
-    dias_hist = st.sidebar.number_input("Dias de Histórico para Análise", min_value=7, max_value=365, value=10, step=1)
-    data_inicio = st.sidebar.date_input("Data Início", date.today() - timedelta(days=DEFAULTS["dias_filtro_inicio"]))
-    data_fim = st.sidebar.date_input("Data Fim", date.today() + timedelta(days=DEFAULTS["dias_filtro_fim"]))
-    
-    # Filtros de conteúdo
-    pastas_opts = sorted(df_full["activity_folder"].dropna().unique()) if not df_full.empty else []
-    status_opts = sorted(df_full["activity_status"].dropna().unique()) if not df_full.empty else []
-    
-    # Define os status padrão, excluindo qualquer um que seja 'Cancelado' ou similar
     default_statuses = [s for s in status_opts if "Cancelad" not in s]
-    
     pastas_sel = st.sidebar.multiselect("Filtrar por Pastas", pastas_opts)
     status_sel = st.sidebar.multiselect("Filtrar por Status", status_opts, default=default_statuses)
     
-    # NOVO FILTRO
-    only_groups_with_open = st.sidebar.toggle("Apenas grupos com atividades abertas", value=True, help="Se ativo, mostra apenas grupos que contenham pelo menos uma atividade no estado 'Aberta'.")
+    only_groups_with_open = st.sidebar.toggle("Apenas grupos com abertas", value=True)
+    strict_only = st.sidebar.toggle("Modo Estrito (Só dupes muito próximas)", value=True)
 
-    # Modo de exibição estrito
-    strict_only = st.sidebar.toggle("Modo Estrito", value=True, help="Exibe apenas itens com similaridade e containment acima do limiar em relação ao item principal do grupo.")
+    with st.sidebar.expander("⚙️ Configurações Avançadas", expanded=False):
+        sim_cfg = st.secrets.get("similarity", {})
+        min_sim = st.slider("Similaridade Mínima Global (%)", 0, 100, int(sim_cfg.get("min_sim_global", DEFAULTS["min_sim_global"])), 1) / 100.0
+        min_containment = st.slider("Containment Mínimo (%)", 0, 100, int(sim_cfg.get("min_containment", DEFAULTS["min_containment"])), 1)
+        pre_delta = st.slider("Delta do Pré-corte", 0, 30, int(sim_cfg.get("pre_cutoff_delta", DEFAULTS["pre_cutoff_delta"])), 1)
+        diff_limit = st.number_input("Limite de Chars do Diff", min_value=5000, value=int(sim_cfg.get("diff_hard_limit", DEFAULTS["diff_hard_limit"])), step=1000)
+        use_cnj = st.toggle("Restringir por Nº do Processo (CNJ)", value=True)
 
-    st.sidebar.header("🚀 Otimizações (Pré-índice)")
-    use_cnj = st.sidebar.toggle("Restringir por Nº do Processo (CNJ)", value=True, help="Compara apenas atividades que compartilham o mesmo número de processo.")
-    
-    st.sidebar.header("📡 API de Cancelamento")
-    dry_run = st.sidebar.toggle("Modo Teste (Dry-run)", value=bool(st.secrets.get("api_client", {}).get("dry_run", False)), help="Se ativo, simula as chamadas de API sem cancelar as atividades de fato.")
-    st.session_state[SK.CFG] = {"dry_run": dry_run}
-    
-    # Exibe regras por pasta para informação
-    with st.sidebar.expander("Regras de Similaridade por Pasta"):
+    with st.sidebar.expander("📡 Sistema & API", expanded=False):
+        dry_run = st.toggle("Modo Teste (Dry-run API)", value=bool(st.secrets.get("api_client", {}).get("dry_run", False)))
+        st.session_state[SK.CFG] = {"dry_run": dry_run}
         st.json(st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {}))
 
+    # A interface original pedia data_inicio e fim, mas no novo fluxo o SQL usa apenas limite (dias_hist) e hoje.
+    # Pode-se retirar data_inicio e fim se o banco carrega apenas histórico recente.
+    # Mantendo compatibilidade com dicionário da chamada original:
+    
     return dict(
         min_sim=min_sim, min_containment=min_containment, pre_delta=pre_delta,
-        diff_limit=diff_limit, dias_hist=dias_hist, data_inicio=data_inicio, data_fim=data_fim,
-        pastas=pastas_sel, status=status_sel, use_cnj=use_cnj,
-        strict_only=strict_only, only_groups_with_open=only_groups_with_open
+        diff_limit=diff_limit, dias_hist=dias_hist, pastas=pastas_sel, status=status_sel, 
+        use_cnj=use_cnj, strict_only=strict_only, only_groups_with_open=only_groups_with_open
     )
 
 def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
@@ -603,13 +629,13 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
 
     for candidate in candidates:
         candidate_id = candidate['activity_id']
-        c_norm, c_meta = cache[candidate_id]
+        c_norm = candidate.get('_norm', "")
+        c_meta = candidate.get('_meta', {})
+
         scores = []
         for other in group_rows:
             if other['activity_id'] == candidate_id: continue
-            o_norm, o_meta = cache[other['activity_id']]
-            
-            score, details = combined_score(c_norm, o_norm, c_meta, o_meta)
+            score, details = combined_score(c_norm, other.get('_norm', ""), c_meta, other.get('_meta', {}))
             if score >= min_sim_pct and details['contain'] >= min_containment_pct:
                 scores.append(score)
         
@@ -641,17 +667,15 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
         state["principal_id"] = get_best_principal_id(group_rows, params['min_sim'] * 100, params['min_containment'])
 
     principal = next(r for r in group_rows if r["activity_id"] == state["principal_id"])
-    p_norm = normalize_for_match(principal.get("Texto", ""), [])
-    p_meta = extract_meta(principal.get("Texto", ""))
+    p_norm = principal.get("_norm", "")
+    p_meta = principal.get("_meta", {})
 
     # Filtra os itens a serem exibidos com base no modo estrito
     if params['strict_only']:
         visible_rows = [principal]
         for row in group_rows:
             if row["activity_id"] == principal["activity_id"]: continue
-            r_norm = normalize_for_match(row.get("Texto", ""), [])
-            r_meta = extract_meta(row.get("Texto", ""))
-            score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+            score, details = combined_score(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
             if score >= (params['min_sim'] * 100) and details['contain'] >= params['min_containment']:
                 visible_rows.append(row)
     else:
@@ -718,9 +742,7 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                     st.caption(f"**Data:** {dt.strftime('%d/%m/%Y %H:%M') if dt else 'N/A'} | **Status:** {row.get('activity_status','')} | **Usuário:** {row.get('user_profile_name','')}")
 
                     if not is_principal:
-                        r_norm = normalize_for_match(row.get("Texto", ""), [])
-                        r_meta = extract_meta(row.get("Texto", ""))
-                        score, details = combined_score(p_norm, r_norm, p_meta, r_meta)
+                        score, details = combined_score(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
                         score_pct = params['min_sim'] * 100
                         badge_color = "badge-green" if score >= score_pct + 5 else "badge-yellow" if score >= score_pct else "badge-red"
                         tooltip = f"Set: {details['set']:.0f}% | Sort: {details['sort']:.0f}% | Contain: {details['contain']:.0f}% | Bônus: {details['bonus']}"
@@ -730,21 +752,7 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
 
                 with c2:
                     if not is_principal:
-                        if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
-                            log_action_to_firestore(db_firestore, user, "set_principal", {
-                                "group_id": group_id, "previous_principal_id": state["principal_id"],
-                                "new_principal_id": rid, "method": "manual"
-                            })
-                            state["principal_id"] = rid
-                            state["open_compare"] = None
-                            st.rerun()
-                        
-                        if st.button("⚖️ Comparar com Principal", key=f"cmp_{rid}", use_container_width=True):
-                            state["open_compare"] = rid if not is_comparing else None
-                            st.rerun()
-
-                    if not is_principal and is_comparing:
-                        st.markdown("---")
+                        # Checkbox de cancelamento agora sempre visível fora do modal de comparar
                         cancel_checked = st.checkbox("🗑️ Marcar para Cancelar", value=is_marked_for_cancel, key=f"cancel_{rid}")
                         if cancel_checked != is_marked_for_cancel:
                             action = "mark_cancel" if cancel_checked else "unmark_cancel"
@@ -755,24 +763,34 @@ def render_group(group_rows: List[Dict], params: Dict, db_firestore):
                             if cancel_checked: state["cancelados"].add(rid)
                             else: state["cancelados"].discard(rid)
                             st.rerun()
+
+                        if st.button("⭐ Tornar Principal", key=f"mkp_{rid}", use_container_width=True):
+                            log_action_to_firestore(db_firestore, user, "set_principal", {
+                                "group_id": group_id, "previous_principal_id": state["principal_id"],
+                                "new_principal_id": rid, "method": "manual"
+                            })
+                            state["principal_id"] = rid
+                            state["open_compare"] = None
+                            st.rerun()
+                        
+                        if st.button("⚖️ Comparar com Principal", key=f"cmp_{rid}", use_container_width=True):
+                            show_diff_dialog(principal, row, params['diff_limit'])
+
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        if state["open_compare"]:
-            comparado_row = next((r for r in group_rows if r["activity_id"] == state["open_compare"]), None)
-            if comparado_row:
-                st.markdown("---")
-                st.subheader("Comparação Detalhada (Diff)")
-                st.markdown(
-                    """<div style='margin-bottom: 10px;'><strong>Legenda:</strong>
-                       <span style='background-color: #c8e6c9; padding: 2px 5px; border-radius: 3px;'>Texto adicionado</span>
-                       <span style='background-color: #ffcdd2; padding: 2px 5px; border-radius: 3px; margin-left: 10px;'>Texto removido</span>
-                    </div>""", unsafe_allow_html=True)
-                c1, c2 = st.columns(2)
-                c1.markdown(f"**Principal: ID `{principal['activity_id']}`**")
-                c2.markdown(f"**Comparado: ID `{comparado_row['activity_id']}`**")
-                hA, hB = highlight_diffs_safe(principal.get("Texto", ""), comparado_row.get("Texto", ""), params['diff_limit'])
-                c1.markdown(hA, unsafe_allow_html=True)
-                c2.markdown(hB, unsafe_allow_html=True)
+@st.dialog("Comparação Detalhada", width="large")
+def show_diff_dialog(principal, comparado_row, diff_limit):
+    st.markdown(
+        """<div style='margin-bottom: 10px;'><strong>Legenda:</strong>
+           <span style='background-color: #c8e6c9; padding: 2px 5px; border-radius: 3px;'>Texto adicionado</span>
+           <span style='background-color: #ffcdd2; padding: 2px 5px; border-radius: 3px; margin-left: 10px;'>Texto removido</span>
+        </div>""", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    c1.markdown(f"**Principal:** `{principal['activity_id']}`")
+    c2.markdown(f"**Comparado:** `{comparado_row['activity_id']}`")
+    hA, hB = highlight_diffs_safe(principal.get("Texto", ""), comparado_row.get("Texto", ""), diff_limit)
+    c1.markdown(hA, unsafe_allow_html=True)
+    c2.markdown(hB, unsafe_allow_html=True)
 
 # =============================================================================
 # AÇÕES (EXPORTAR, PROCESSAR) E CALIBRAÇÃO
@@ -854,8 +872,8 @@ def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestor
             principal_row = next((r for r in g if r['activity_id'] == principal_id), None)
             if not principal_row: continue
 
-            p_norm = normalize_for_match(principal_row.get("Texto", ""), [])
-            p_meta = extract_meta(principal_row.get("Texto", ""))
+            p_norm = principal_row.get("_norm", "")
+            p_meta = principal_row.get("_meta", {})
 
             for cancel_id in state.get("cancelados", set()):
                 cancel_row = next((r for r in g if r['activity_id'] == cancel_id), None)
@@ -863,10 +881,8 @@ def confirm_cancellation_dialog(groups: List[List[Dict]], user: str, db_firestor
 
                 # Calcula a similaridade para exibir na confirmação
                 if (principal_id, cancel_id) not in score_cache:
-                    c_norm = normalize_for_match(cancel_row.get("Texto", ""), [])
-                    c_meta = extract_meta(cancel_row.get("Texto", ""))
-                    score, _ = combined_score(p_norm, c_norm, p_meta, c_meta)
-                    score_cache[(principal_id, cancel_id)] = score
+                    score, _ = combined_score(p_norm, cancel_row.get("_norm", ""), p_meta, cancel_row.get("_meta", {}))
+                    score_cache[(principal_id, cancel_id)] = float(score)
 
                 to_cancel_with_context.append({
                     "ID a Cancelar": cancel_id,
@@ -924,11 +940,14 @@ def render_calibration_tab(df: pd.DataFrame):
 
         n = len(sample_df)
         indices = np.arange(n)
-        pairs = set()
-        rng = np.random.default_rng(seed=42)
-        while len(pairs) < min(num_samples, (n * (n - 1)) // 2):
-            i, j = rng.choice(indices, size=2, replace=False)
-            pairs.add(tuple(sorted((i, j))))
+        import itertools
+        pairs = list(itertools.combinations(indices, 2))
+        
+        # Se for um número astronômico de pares e só precisamos de `num_samples`, usamos random sample do array gerado
+        if len(pairs) > num_samples:
+            rng = np.random.default_rng(seed=42)
+            idx_choices = rng.choice(len(pairs), size=num_samples, replace=False)
+            pairs = [pairs[i] for i in idx_choices]
 
         scores = []
         progress = st.progress(0, text="Calculando scores...")
@@ -1018,18 +1037,19 @@ def main():
 
     engine = db_engine_mysql()
     db_firestore = init_firebase()
-    df_full = carregar_dados_mysql(engine, 365)
-    params = sidebar_controls(df_full)
-    df_analysis = carregar_dados_mysql(engine, params["dias_hist"])
     
-    if df_analysis.empty:
-        st.warning("Nenhuma atividade encontrada para o período de análise selecionado.")
+    # Otimização 1: Carrega apenas as opções válidas para o filtro via banco, evitando carregar e dropar a view inteira
+    pastas_opts, status_opts = carregar_opcoes_mysql(engine)
+    
+    params = sidebar_controls(pastas_opts, status_opts)
+    
+    # Otimização 2: A query SQL já puxa filtrado do banco de dados e só pelo que precisamos. 
+    # (Como não tem mais 'data_inicio' e 'fim', ele usará o dias_historico como base para limite).
+    df_view = carregar_dados_mysql(engine, params["dias_hist"], params["pastas"], params["status"])
+    
+    if df_view.empty:
+        st.warning("Nenhuma atividade encontrada para os filtros selecionados.")
         st.stop()
-
-    mask = ((df_analysis["activity_date"].dt.date >= params["data_inicio"]) & (df_analysis["activity_date"].dt.date <= params["data_fim"]))
-    if params["pastas"]: mask &= df_analysis["activity_folder"].isin(params["pastas"])
-    if params["status"]: mask &= df_analysis["activity_status"].isin(params["status"])
-    df_view = df_analysis[mask].copy()
 
     tab1, tab2, tab3 = st.tabs(["🔎 Análise de Duplicidades", "📊 Calibração", "📜 Histórico de Ações"])
 
@@ -1042,7 +1062,18 @@ def main():
         if params["only_groups_with_open"]:
             groups = [g for g in groups if any(r.get("activity_status") == "Aberta" for r in g)]
 
-        st.metric("Grupos de Duplicatas Encontrados", len(groups))
+        # --- Métricas de Cobertura ---
+        m1, m2, m3, m4 = st.columns(4)
+        abertas_total = sum(1 for _, row in df_view.iterrows() if row.get("activity_status") == "Aberta")
+        abertas_agrupadas = sum(sum(1 for r in g if r.get("activity_status") == "Aberta") for g in groups)
+        
+        m1.metric("Grupos Encontrados", len(groups))
+        m2.metric("Abertas no Período", abertas_total)
+        m3.metric("Abertas Agrupadas", abertas_agrupadas, delta=f"{abertas_agrupadas/max(1, abertas_total):.0%}", delta_color="normal")
+        
+        total_marcados = sum(len(st.session_state[SK.GROUP_STATES].get(g[0]['activity_id'], {}).get('cancelados', [])) for g in groups)
+        m4.metric("Marcados para Cancelar", total_marcados)
+        st.markdown("---")
 
         page_size = st.number_input("Grupos por página", min_value=5, value=DEFAULTS["itens_por_pagina"], step=5)
         total_pages = max(1, math.ceil(len(groups) / page_size))
@@ -1069,7 +1100,7 @@ def main():
             confirm_cancellation_dialog(groups, st.session_state.get(SK.USERNAME), db_firestore, params)
 
     with tab2:
-        render_calibration_tab(df_full)
+        render_calibration_tab(df_view)
     with tab3:
         render_history_tab(db_firestore)
 
