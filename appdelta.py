@@ -156,9 +156,9 @@ def db_engine_mysql() -> Optional[Engine]:
         st.error(f"Erro ao conectar no banco de dados (MySQL): {e}")
         st.stop()
 
-@st.cache_resource
-def api_client() -> Optional[HttpClientRetry]:
-    """Cria e armazena em cache o cliente para a API de cancelamento."""
+# Nota: Removemos o @st.cache_resource para evitar que usuários no app modifiquem o dry_run global.
+def api_client(dry_run: bool = False) -> Optional[HttpClientRetry]:
+    """Cria uma nova instância do cliente para a API de cancelamento."""
     if HttpClientRetry is None: return None
     
     api_cfg = st.secrets.get("api", {})
@@ -176,7 +176,7 @@ def api_client() -> Optional[HttpClientRetry]:
         calls_per_second=float(client_cfg.get("calls_per_second", 3.0)),
         max_attempts=int(client_cfg.get("max_attempts", 3)),
         timeout=int(client_cfg.get("timeout", 15)),
-        dry_run=bool(client_cfg.get("dry_run", False))
+        dry_run=dry_run
     )
 
 @st.cache_resource
@@ -189,15 +189,16 @@ def init_firebase():
         # Verifica se o app já foi inicializado
         if not firebase_admin._apps:
             creds_config = st.secrets.get("firebase_credentials")
-            if not creds_config:
-                st.warning("Credenciais do Firebase não encontradas em st.secrets. A auditoria está desativada.")
+            if not creds_config or 'project_id' not in creds_config:
+                st.warning("Credenciais do Firebase ausentes ou incompletas em st.secrets. A auditoria está desativada.")
                 return None
             
             # Cria uma cópia mutável do dicionário de credenciais
             creds_dict = dict(creds_config)
             
-            # Corrige a chave privada que vem com `\n` literais do secrets
-            creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+            # Corrige a chave privada que vem com `\n` literais do secrets, verificando a existência
+            if 'private_key' in creds_dict:
+                creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
             
             cred = credentials.Certificate(creds_dict)
             firebase_admin.initialize_app(cred)
@@ -495,11 +496,11 @@ def highlight_diffs_safe(text1: str, text2: str, hard_limit: int) -> Tuple[str,s
     """Gera um diff visual entre dois textos, com um fallback para textos muito grandes."""
     t1, t2 = (text1 or ""), (text2 or "")
     if (len(t1) + len(t2)) > hard_limit:
-        # Fallback: compara apenas as primeiras N sentenças para evitar travamentos
-        s1 = " ".join(re.split(r'([.!?\n]+)', t1)[:100])
-        s2 = " ".join(re.split(r'([.!?\n]+)', t2)[:100])
+        # Fallback: compara apenas um pedaço do texto para evitar travamentos, sem quebrar palavras ao meio
+        s1 = t1[:hard_limit // 2]
+        s2 = t2[:hard_limit // 2]
         h1, h2 = highlight_diffs(s1, s2)
-        note = "<div class='small-muted'>⚠️ Diff parcial por tamanho. Comparando apenas o início dos textos.</div>"
+        note = f"<div class='small-muted'>⚠️ Diff parcial por tamanho. Exibindo apenas os primeiros {hard_limit // 2} caracteres de cada texto.</div>"
         return (note + h1, note + h2)
     return highlight_diffs(t1, t2)
 
@@ -588,18 +589,17 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
     if not group_rows:
         return ""
         
-    # Separa os candidatos em 'fechados' (prioritários) e 'abertos'
-    closed_candidates = [r for r in group_rows if r.get("activity_status") != "Aberta"]
-    open_candidates = [r for r in group_rows if r.get("activity_status") == "Aberta"]
-
-    # A lista de candidatos para o cálculo agora prioriza os fechados
-    candidates = closed_candidates + open_candidates
-    if not candidates:
-        return group_rows[0]['activity_id'] # Fallback caso todos sejam None
+    # Identifica fechados de forma mais limpa com um Set
+    closed_ids = {r['activity_id'] for r in group_rows if r.get("activity_status") != "Aberta"}
 
     best_id, max_avg_score = None, -1.0
     
     cache = {r['activity_id']: (normalize_for_match(r.get('Texto', ''), []), extract_meta(r.get('Texto', ''))) for r in group_rows}
+
+    # Ordena para priorizar sempre os IDs das atividades fechadas primeiro
+    candidates = sorted(group_rows, key=lambda x: x['activity_id'] not in closed_ids)
+    if not candidates:
+        return group_rows[0]['activity_id']
 
     for candidate in candidates:
         candidate_id = candidate['activity_id']
@@ -615,15 +615,12 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
         
         avg_score = sum(scores) / len(scores) if scores else 0.0
 
-        # A primeira atividade fechada que tiver um score médio já se torna a melhor candidata
         if best_id is None or avg_score > max_avg_score:
             max_avg_score, best_id = avg_score, candidate_id
         
-        # Se já encontramos um principal fechado, não precisamos avaliar os abertos se eles não tiverem um score significativamente maior
-        if candidate in closed_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
-            pass # Continua para ver se há um fechado melhor
-        elif candidate in open_candidates and best_id in [c['activity_id'] for c in closed_candidates]:
-            break # Já temos um principal fechado, paramos aqui
+        # Otimização: se já encontramos um principal válido fechado, e o candidato atual é da lista aberta, não precisamos recalcular para o resto.
+        if candidate_id not in closed_ids and best_id in closed_ids:
+            break
             
     return best_id or group_rows[0]['activity_id']
 
@@ -797,13 +794,13 @@ def export_groups_csv(groups: List[List[Dict]]) -> bytes:
 
 def process_cancellations(to_cancel_with_context: List[Dict], user: str, db_firestore):
     """Lógica de cancelamento que é chamada pelo diálogo de confirmação."""
-    client = api_client()
+    is_dry_run = st.session_state[SK.CFG].get("dry_run", True)
+    client = api_client(dry_run=is_dry_run)
     if not client:
         st.error("Cliente de API não configurado.")
         return
 
-    client.dry_run = st.session_state[SK.CFG].get("dry_run", True)
-    
+
     st.info(f"Iniciando o cancelamento de {len(to_cancel_with_context)} atividades...")
     progress = st.progress(0)
     results = {"ok": 0, "err": 0}
@@ -1004,7 +1001,7 @@ def main():
     
     for key in [SK.USERNAME, SK.SIMILARITY_CACHE, SK.PAGE_NUMBER, SK.GROUP_STATES, SK.CFG, SK.SHOW_CANCEL_CONFIRM, SK.IGNORED_GROUPS]:
         if key not in st.session_state:
-            st.session_state[key] = set() if key == SK.IGNORED_GROUPS else False if key == SK.SHOW_CANCEL_CONFIRM else 0 if key == SK.PAGE_NUMBER else {}
+            st.session_state[key] = set() if key == SK.IGNORED_GROUPS else False if key == SK.SHOW_CANCEL_CONFIRM else 1 if key == SK.PAGE_NUMBER else {}
 
     if not st.session_state.get(SK.USERNAME):
         with st.sidebar.form("login_form"):
@@ -1049,7 +1046,8 @@ def main():
 
         page_size = st.number_input("Grupos por página", min_value=5, value=DEFAULTS["itens_por_pagina"], step=5)
         total_pages = max(1, math.ceil(len(groups) / page_size))
-        page_num = st.number_input("Página", min_value=1, max_value=total_pages, value=1, step=1)
+        # Amarração correta do session_state da página
+        page_num = st.number_input("Página", min_value=1, max_value=total_pages, key=SK.PAGE_NUMBER, step=1)
         start_idx = (page_num - 1) * page_size
         end_idx = start_idx + page_size
         st.caption(f"Exibindo grupos {start_idx + 1}–{min(end_idx, len(groups))} de {len(groups)}")

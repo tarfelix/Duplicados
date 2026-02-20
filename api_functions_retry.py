@@ -87,8 +87,12 @@ class HttpClientRetry:
                 )
                 # Lança uma exceção para erros HTTP (4xx, 5xx)
                 response.raise_for_status()
-                # Se a resposta for bem-sucedida, retorna o JSON
-                return response.json()
+                # Se a resposta for bem-sucedida, tenta deserializar o JSON
+                try:
+                    return response.json()
+                except ValueError as e:
+                    logging.error(f"A resposta na tentativa {attempt + 1}/{self.max_attempts} para {url} não é um JSON válido: {e}")
+                    return {"ok": False, "success": False, "error": "Invalid JSON response", "message": response.text}
             
             except requests.exceptions.HTTPError as e:
                 # Para erros de cliente (4xx), não adianta tentar novamente.
