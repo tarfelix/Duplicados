@@ -6,7 +6,7 @@ from unidecode import unidecode
 from rapidfuzz import fuzz, process
 from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional, Any
-from src.config import SK
+from src.config import SK, get_secret
 
 # Regexes
 CNJ_RE = re.compile(r"(?:\b|^)(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})(?:\b|$)")
@@ -90,11 +90,11 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
 
     # Cache logic locally simplified for module
     work_df = df.copy()
-    stopwords_extra = st.secrets.get("similarity", {}).get("stopwords_extra", [])
+    stopwords_extra = get_secret("similarity.stopwords_extra", [])
     work_df["_meta"] = work_df["Texto"].apply(extract_meta)
     work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_text(t, stopwords_extra))
 
-    cutoffs_map = st.secrets.get("similarity", {}).get("cutoffs_por_pasta", {})
+    cutoffs_map = get_secret("similarity.cutoffs_por_pasta", {})
     
     # Bucketing
     buckets = defaultdict(list)
