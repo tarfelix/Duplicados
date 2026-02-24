@@ -138,4 +138,40 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
                 cluster_rows = work_df.loc[cluster].sort_values("activity_date", ascending=False)
                 groups.append(cluster_rows.to_dict('records'))
 
-    return groups
+def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
+    """Calcula qual item do grupo é o 'melhor principal' (medoid)."""
+    if not group_rows: return ""
+    
+    # Prioriza atividades que NÃO estão 'Abertas'
+    closed_ids = {r['activity_id'] for r in group_rows if r.get("activity_status") != "Aberta"}
+    
+    # Ordena para priorizar sempre os IDs das atividades fechadas primeiro
+    candidates = sorted(group_rows, key=lambda x: x['activity_id'] not in closed_ids)
+    
+    best_id, max_avg_score = None, -1.0
+    
+    for candidate in candidates:
+        candidate_id = candidate['activity_id']
+        c_norm = candidate.get('_norm') or normalize_text(candidate.get('Texto', ''), [])
+        c_meta = candidate.get('_meta') or extract_meta(candidate.get('Texto', ''))
+
+        scores = []
+        for other in group_rows:
+            if other['activity_id'] == candidate_id: continue
+            o_norm = other.get('_norm') or normalize_text(other.get('Texto', ''), [])
+            o_meta = other.get('_meta') or extract_meta(other.get('Texto', ''))
+            
+            score, details = combined_score(c_norm, o_norm, c_meta, o_meta)
+            if score >= min_sim_pct and details['contain'] >= min_containment_pct:
+                scores.append(score)
+        
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        if best_id is None or avg_score > max_avg_score:
+            max_avg_score, best_id = avg_score, candidate_id
+        
+        # Otimização: se já encontramos um principal fechado e o atual é aberto, paramos
+        if candidate_id not in closed_ids and best_id in closed_ids:
+            break
+            
+    return str(best_id or group_rows[0]['activity_id'])

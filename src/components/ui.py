@@ -2,7 +2,12 @@ import streamlit as st
 import html
 import re
 from difflib import SequenceMatcher
-from typing import Tuple
+from typing import Tuple, List, Dict, Set, Any
+import pandas as pd
+from zoneinfo import ZoneInfo
+from src.config import SK, TZ_SP, TZ_UTC
+
+# We will pass logic functions (combined_score, log_action) as arguments to avoid circular imports
 
 def apply_styles():
     st.markdown("""
@@ -48,3 +53,103 @@ def render_diff(a: str, b: str, limit: int = 12000) -> Tuple[str, str]:
             
     return (note + f"<pre class='highlighted-text'>{''.join(out1)}</pre>", 
             note + f"<pre class='highlighted-text'>{''.join(out2)}</pre>")
+
+@st.dialog("Comparação Detalhada", width="large")
+def show_diff_dialog(principal: Dict, comparado: Dict, diff_limit: int):
+    st.markdown("""
+        <div style='margin-bottom: 10px;'><strong>Legenda:</strong>
+           <span style='background-color: #c8e6c9; padding: 2px 5px; border-radius: 3px;'>Texto adicionado</span>
+           <span style='background-color: #ffcdd2; padding: 2px 5px; border-radius: 3px; margin-left: 10px;'>Texto removido</span>
+        </div>
+    """, unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    c1.markdown(f"**Principal:** `{principal['activity_id']}`")
+    c2.markdown(f"**Comparado:** `{comparado['activity_id']}`")
+    
+    hA, hB = render_diff(principal.get("Texto", ""), comparado.get("Texto", ""), diff_limit)
+    c1.markdown(hA, unsafe_allow_html=True)
+    c2.markdown(hB, unsafe_allow_html=True)
+
+def render_group(group_rows: List[Dict], 
+                 params: Dict, 
+                 get_best_principal_fn: Any,
+                 combined_score_fn: Any):
+    """Renderiza um único grupo de atividades duplicadas com toda a lógica de interação."""
+    group_id = group_rows[0]["activity_id"]
+    
+    # State management
+    if SK.GROUP_STATES not in st.session_state:
+        st.session_state[SK.GROUP_STATES] = {}
+        
+    state = st.session_state[SK.GROUP_STATES].setdefault(group_id, {
+        "principal_id": None,
+        "cancelados": set()
+    })
+
+    # Auto-calculate principal
+    if state["principal_id"] is None:
+        state["principal_id"] = get_best_principal_fn(group_rows, params['min_sim'] * 100, params['min_containment'])
+
+    principal = next((r for r in group_rows if r["activity_id"] == state["principal_id"]), group_rows[0])
+    p_norm = principal.get("_norm", "")
+    p_meta = principal.get("_meta", {})
+
+    expander_title = f"Grupo: {len(group_rows)} itens | Pasta: {group_rows[0].get('activity_folder')} | Principal: #{state['principal_id']}"
+    
+    with st.expander(expander_title):
+        cols = st.columns(3)
+        with cols[0]:
+            if st.button("⭐ Recalcular Principal", key=f"recalc_{group_id}"):
+                state["principal_id"] = get_best_principal_fn(group_rows, params['min_sim'] * 100, params['min_containment'])
+                st.rerun()
+        with cols[1]:
+            if st.button("🗑️ Marcar Todos", key=f"all_{group_id}"):
+                state['cancelados'].update({r['activity_id'] for r in group_rows if r['activity_id'] != state['principal_id']})
+                st.rerun()
+        with cols[2]:
+            if st.button("👍 Ignorar Grupo", key=f"ign_{group_id}"):
+                st.session_state[SK.IGNORED_GROUPS].add(group_id)
+                st.rerun()
+
+        st.divider()
+
+        for row in group_rows:
+            rid = row["activity_id"]
+            is_p = (rid == state["principal_id"])
+            is_c = (rid in state["cancelados"])
+            
+            card_class = "card"
+            if is_p: card_class += " card-principal"
+            if is_c: card_class += " card-cancelado"
+            
+            st.markdown(f"<div class='{card_class}'>", unsafe_allow_html=True)
+            c1, c2 = st.columns([0.7, 0.3])
+            
+            with c1:
+                dt = pd.to_datetime(row.get("activity_date")).tz_localize(TZ_UTC).tz_convert(TZ_SP) if row.get("activity_date") else None
+                date_str = dt.strftime('%d/%m/%Y %H:%M') if dt else "N/A"
+                st.markdown(f"**ID:** `{rid}` { '⭐ **Principal**' if is_p else ''} { '🗑️ **Marcado p/ Cancelar**' if is_c else ''}")
+                st.caption(f"{date_str} | {row.get('activity_status')} | {row.get('user_profile_name')}")
+                
+                if not is_p:
+                    score, _ = combined_score_fn(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
+                    st.markdown(f"<span class='similarity-badge badge-green'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
+
+                st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}_{group_id}")
+
+            with c2:
+                if not is_p:
+                    cancel = st.checkbox("Selecionar p/ Cancelar", value=is_c, key=f"chk_{rid}_{group_id}")
+                    if cancel != is_c:
+                        if cancel: state["cancelados"].add(rid)
+                        else: state["cancelados"].discard(rid)
+                        st.rerun()
+                    
+                    if st.button("Tornar Principal", key=f"best_{rid}_{group_id}", use_container_width=True):
+                        state["principal_id"] = rid
+                        st.rerun()
+                    
+                    if st.button("⚖️ Comparar", key=f"cmp_{rid}_{group_id}", use_container_width=True):
+                        show_diff_dialog(principal, row, params.get('diff_limit', 12000))
+
+            st.markdown("</div>", unsafe_allow_html=True)
