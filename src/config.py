@@ -32,20 +32,33 @@ DEFAULTS = {
 
 def get_secret(key_path: str, default=None):
     """
-    Busca um segredo no Streamlit. 
-    Aceita formato ponto (ex: 'database.host') e tenta fallback para flat (ex: 'DATABASE_HOST').
+    Busca um segredo no Streamlit de forma ultra-resiliente.
+    Tenta o formato aninhado, o formato flat e o fallback para variáveis de ambiente (OS).
+    Isso evita o erro 'StreamlitSecretNotFoundError' no Coolify/Docker.
     """
-    # 1. Tentar aninhado
+    import os
     parts = key_path.split('.')
-    val = st.secrets
-    found = True
+    flat_key = "_".join(parts).upper()
+
+    # 1. Tentar via Streamlit (Nested ou Flat)
     try:
+        # Tenta percorrer o caminho (ex: database -> host)
+        val = st.secrets
         for part in parts:
             val = val[part]
-        return val
-    except (KeyError, AttributeError, TypeError):
-        found = False
+        if val is not None:
+            return val
+    except Exception:
+        # Se falhar qualquer acesso ao st.secrets, ignoramos e tentamos o próximo
+        pass
 
-    # 2. Tentar Flat (DATABASE_HOST)
-    flat_key = "_".join(parts).upper()
-    return st.secrets.get(flat_key, default)
+    try:
+        # Tenta o flat key direto no st.secrets (ex: DATABASE_HOST)
+        val_flat = st.secrets.get(flat_key)
+        if val_flat is not None:
+            return val_flat
+    except Exception:
+        pass
+
+    # 2. Resgate definitivo via Variáveis de Ambiente do Sistema (Docker/Coolify)
+    return os.environ.get(flat_key, default)
