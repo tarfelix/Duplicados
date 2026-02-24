@@ -7,6 +7,8 @@ try:
 except ImportError:
     firebase_admin = None
 
+from src.config import get_secret
+
 @st.cache_resource
 def init_firestore():
     """Inicializa a conexão com o Firebase."""
@@ -15,12 +17,30 @@ def init_firestore():
     
     try:
         if not firebase_admin._apps:
-            creds_config = st.secrets.get("firebase_credentials")
-            if not creds_config or 'project_id' not in creds_config:
+            # Tenta pegar o dicionário completo (secrets.toml)
+            creds_dict = get_secret("firebase_credentials")
+            
+            # Se não for um dict completo (comum em env vars), tenta montar a partir de chaves individuais
+            if not isinstance(creds_dict, dict) or 'project_id' not in creds_dict:
+                creds_dict = {
+                    "type": get_secret("firebase_credentials.type", "service_account"),
+                    "project_id": get_secret("firebase_credentials.project_id"),
+                    "private_key_id": get_secret("firebase_credentials.private_key_id"),
+                    "private_key": get_secret("firebase_credentials.private_key"),
+                    "client_email": get_secret("firebase_credentials.client_email"),
+                    "client_id": get_secret("firebase_credentials.client_id"),
+                    "auth_uri": get_secret("firebase_credentials.auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+                    "token_uri": get_secret("firebase_credentials.token_uri", "https://oauth2.googleapis.com/token"),
+                    "auth_provider_x509_cert_url": get_secret("firebase_credentials.auth_provider_x509_cert_url"),
+                    "client_x509_cert_url": get_secret("firebase_credentials.client_x509_cert_url"),
+                    "universe_domain": get_secret("firebase_credentials.universe_domain", "googleapis.com")
+                }
+
+            if not creds_dict.get('project_id') or not creds_dict.get('private_key'):
                 return None
             
-            creds_dict = dict(creds_config)
-            if 'private_key' in creds_dict:
+            # Corrige a private_key (escapes de \n)
+            if 'private_key' in creds_dict and isinstance(creds_dict['private_key'], str):
                 creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
             
             cred = credentials.Certificate(creds_dict)

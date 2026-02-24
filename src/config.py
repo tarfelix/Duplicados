@@ -31,12 +31,21 @@ DEFAULTS = {
 }
 
 def get_secret(key_path: str, default=None):
-    """Auxiliar para ler secrets com segurança."""
+    """
+    Busca um segredo no Streamlit. 
+    Aceita formato ponto (ex: 'database.host') e tenta fallback para flat (ex: 'DATABASE_HOST').
+    """
+    # 1. Tentar aninhado
     parts = key_path.split('.')
     val = st.secrets
+    found = True
     try:
         for part in parts:
             val = val[part]
         return val
-    except (KeyError, AttributeError):
-        return default
+    except (KeyError, AttributeError, TypeError):
+        found = False
+
+    # 2. Tentar Flat (DATABASE_HOST)
+    flat_key = "_".join(parts).upper()
+    return st.secrets.get(flat_key, default)

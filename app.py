@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from src.config import APP_TITLE, SK, DEFAULTS, TZ_SP, TZ_UTC
+from src.config import APP_TITLE, SK, DEFAULTS, TZ_SP, TZ_UTC, get_secret
 from src.database.mysql_client import get_mysql_engine, carregar_opcoes_mysql, carregar_dados_mysql
 from src.database.firestore import init_firestore, log_action
 from src.core.matcher import create_groups, combined_score
@@ -43,8 +43,8 @@ if df.empty:
     st.info("Nenhum dado encontrado para os filtros selecionados.")
 else:
     params = {
-        'min_sim': st.secrets.get("similarity", {}).get("min_sim_global", 0.9),
-        'min_containment': st.secrets.get("similarity", {}).get("min_containment", 55),
+        'min_sim': float(get_secret("similarity.min_sim_global", 0.9)),
+        'min_containment': int(get_secret("similarity.min_containment", 55)),
         'use_cnj': use_cnj
     }
     

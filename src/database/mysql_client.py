@@ -6,19 +6,23 @@ from datetime import date, timedelta
 from typing import List, Tuple, Dict, Any, Optional
 import logging
 
+from src.config import get_secret
+
 @st.cache_resource
 def get_mysql_engine() -> Optional[Engine]:
     """Cria e armazena em cache a engine de conexão com o MySQL."""
-    cfg = st.secrets.get("database", {})
-    db_params = {k: cfg.get(k) for k in ["host", "user", "password", "name"]}
+    host = get_secret("database.host")
+    user = get_secret("database.user")
+    password = get_secret("database.password")
+    name = get_secret("database.name")
     
-    if not all(db_params.values()):
-        st.error("Credenciais do banco de dados (MySQL) ausentes em st.secrets['database'].")
+    if not all([host, user, password, name]):
+        st.error("Credenciais do banco de dados (MySQL) ausentes. Verifique st.secrets ou variáveis de ambiente.")
         return None
     
     try:
         engine = create_engine(
-            f"mysql+mysqlconnector://{db_params['user']}:{db_params['password']}@{db_params['host']}/{db_params['name']}",
+            f"mysql+mysqlconnector://{user}:{password}@{host}/{name}",
             pool_pre_ping=True,
             pool_recycle=3600
         )

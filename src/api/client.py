@@ -1,7 +1,28 @@
+import streamlit as st
 import requests
 import time
 import logging
 from typing import Dict, Any, Optional
+from src.config import get_secret
+
+def get_api_client(dry_run: bool = False) -> Optional['HttpClientRetry']:
+    """Cria uma nova instância do cliente para a API de cancelamento."""
+    url = get_secret("api.url_api")
+    entity_id = get_secret("api.entity_id")
+    token = get_secret("api.token")
+    
+    if not all([url, entity_id, token]):
+        return None
+        
+    return HttpClientRetry(
+        base_url=str(url),
+        entity_id=int(entity_id),
+        token=str(token),
+        calls_per_second=float(get_secret("api_client.calls_per_second", 3.0)),
+        max_attempts=int(get_secret("api_client.max_attempts", 3)),
+        timeout=int(get_secret("api_client.timeout", 15)),
+        dry_run=dry_run
+    )
 
 class HttpClientRetry:
     def __init__(self,
