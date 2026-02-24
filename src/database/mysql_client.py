@@ -62,16 +62,31 @@ def carregar_dados_mysql(_eng: Engine, dias_historico: int, pastas: List[str] = 
     """
     
     params: Dict[str, Any] = {"limite": limite}
+    
+    # Construímos a query e usamos bindparam com expanding=True para listas/tuples em IN clauses
+    from sqlalchemy import bindparam
+    
+    stmt = text(base_query)
+    
     if pastas:
         base_query += " AND activity_folder IN :pastas"
-        params["pastas"] = tuple(pastas)
+        params["pastas"] = list(pastas)
     if status:
         base_query += " AND activity_status IN :status"
-        params["status"] = tuple(status)
+        params["status"] = list(status)
+
+    # Recriamos o text object com o base_query atualizado
+    stmt = text(base_query)
+    
+    # Configuramos parâmetros expansíveis para as cláusulas IN
+    if pastas:
+        stmt = stmt.bindparams(bindparam("pastas", expanding=True))
+    if status:
+        stmt = stmt.bindparams(bindparam("status", expanding=True))
 
     try:
         with _eng.connect() as conn:
-            df = pd.read_sql(text(base_query), conn, params=params)
+            df = pd.read_sql(stmt, conn, params=params)
         
         if df.empty:
             return pd.DataFrame()
