@@ -16,10 +16,20 @@ mysql_engine = get_mysql_engine()
 
 if SK.USERNAME not in st.session_state:
     st.title(APP_TITLE)
-    user = st.text_input("Nome do Usuário")
-    if user and st.button("Entrar"):
-        st.session_state[SK.USERNAME] = user
-        st.rerun()
+    with st.container():
+        user = st.text_input("Nome do Usuário")
+        pwd = st.text_input("Senha", type="password")
+        if st.button("Entrar"):
+            if user and pwd:
+                # Busca a senha para o usuário informado
+                valid_pwd = get_secret(f"credentials.usernames.{user}")
+                if valid_pwd and str(valid_pwd) == str(pwd):
+                    st.session_state[SK.USERNAME] = user
+                    st.rerun()
+                else:
+                    st.error("Usuário ou senha inválidos.")
+            else:
+                st.warning("Por favor, preencha todos os campos.")
     st.stop()
 
 # --- Sidebar ---
