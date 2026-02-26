@@ -70,7 +70,9 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
     # Penalidade de tamanho
     len_a, len_b = len(a_norm), len(b_norm)
     lp = 1.0
-    if len_a > 0 and len_b > 0:
+    if len_a == 0 or len_b == 0:
+        lp = 0.7
+    elif len_a > 0 and len_b > 0:
         diff_ratio = abs(len_a - len_b) / max(len_a, len_b)
         lp = max(0.7, 1.0 - diff_ratio * 0.4)
     
@@ -79,6 +81,7 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
     if meta_a.get("processo") and meta_a.get("processo") == meta_b.get("processo"): bonus += 6
     if meta_a.get("orgao") and meta_a.get("orgao") == meta_b.get("orgao"): bonus += 3
     if meta_a.get("tipo_doc") and meta_a.get("tipo_doc") == meta_b.get("tipo_doc"): bonus += 3
+    if meta_a.get("tipo_com") and meta_a.get("tipo_com") == meta_b.get("tipo_com"): bonus += 2
     
     base_score = 0.6 * set_ratio + 0.2 * sort_ratio + 0.2 * contain
     final_score = max(0.0, min(100.0, base_score * lp + bonus))
@@ -95,6 +98,13 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
     work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_text(t, stopwords_extra))
 
     cutoffs_map = get_secret("similarity.cutoffs_por_pasta", {})
+    
+    def _normalize_sim_value(raw) -> float:
+        """Converte valor em escala 0-100 para 0-1 se necessário."""
+        v = float(raw)
+        return v / 100.0 if v > 1 else v
+    
+    min_tokens = int(get_secret("similarity.min_tokens_to_match", 3))
     
     # Bucketing
     buckets = defaultdict(list)
@@ -124,8 +134,17 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
                     if not local_visited[j]:
                         row_i, row_j = work_df.loc[idxs[curr]], work_df.loc[idxs[j]]
                         
+                        # Exigir mínimo de tokens para evitar falsos positivos com texto vazio/quase vazio
+                        norm_i = row_i["_norm"]
+                        norm_j = row_j["_norm"]
+                        tokens_i = norm_i.split() if isinstance(norm_i, str) else []
+                        tokens_j = norm_j.split() if isinstance(norm_j, str) else []
+                        if len(tokens_i) < min_tokens or len(tokens_j) < min_tokens:
+                            continue
+                        
                         folder = row_i.get("activity_folder")
-                        min_sim = float(cutoffs_map.get(folder, params['min_sim'])) * 100
+                        raw_min_sim = cutoffs_map.get(folder, params['min_sim'])
+                        min_sim = _normalize_sim_value(raw_min_sim) * 100
                         
                         score, details = combined_score(row_i["_norm"], row_j["_norm"], row_i["_meta"], row_j["_meta"])
                         if score >= min_sim and details["contain"] >= params['min_containment']:
@@ -137,6 +156,8 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
                 # Sort cluster by date desc
                 cluster_rows = work_df.loc[cluster].sort_values("activity_date", ascending=False)
                 groups.append(cluster_rows.to_dict('records'))
+
+    return groups
 
 def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
     """Calcula qual item do grupo é o 'melhor principal' (medoid)."""

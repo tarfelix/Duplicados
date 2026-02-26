@@ -19,12 +19,12 @@ class SK:
     SHOW_CANCEL_CONFIRM = f"show_cancel_confirm_{SUFFIX}"
     IGNORED_GROUPS = f"ignored_groups_{SUFFIX}"
 
-# Valores Padrão
+# Valores Padrão (min_sim_global em escala 0-1, ex.: 0.9 = 90%)
 DEFAULTS = {
     "itens_por_pagina": 10,
     "dias_filtro_inicio": 7,
     "dias_filtro_fim": 14,
-    "min_sim_global": 90,
+    "min_sim_global": 0.9,
     "min_containment": 55,
     "pre_cutoff_delta": 10,
     "diff_hard_limit": 12000,

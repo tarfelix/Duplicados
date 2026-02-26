@@ -26,6 +26,7 @@ def apply_styles():
         .badge-green { background:#C8E6C9; }
         .badge-yellow { background:#FFF9C4; }
         .badge-red { background:#FFCDD2; }
+        .small-muted { color:#777; font-size:0.85em; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -94,7 +95,8 @@ def render_group(group_rows: List[Dict],
     p_norm = principal.get("_norm", "")
     p_meta = principal.get("_meta", {})
 
-    expander_title = f"Grupo: {len(group_rows)} itens | Pasta: {group_rows[0].get('activity_folder')} | Principal: #{state['principal_id']}"
+    open_count = sum(1 for r in group_rows if r.get("activity_status") == "Aberta")
+    expander_title = f"Grupo: {len(group_rows)} itens ({open_count} Abertas) | Pasta: {group_rows[0].get('activity_folder')} | Principal: #{state['principal_id']}"
     
     with st.expander(expander_title):
         cols = st.columns(3)
@@ -103,11 +105,11 @@ def render_group(group_rows: List[Dict],
                 state["principal_id"] = get_best_principal_fn(group_rows, params['min_sim'] * 100, params['min_containment'])
                 st.rerun()
         with cols[1]:
-            if st.button("🗑️ Marcar Todos", key=f"all_{group_id}"):
+            if st.button("🗑️ Marcar Todos p/ Cancelar", key=f"all_{group_id}"):
                 state['cancelados'].update({r['activity_id'] for r in group_rows if r['activity_id'] != state['principal_id']})
                 st.rerun()
         with cols[2]:
-            if st.button("👍 Ignorar Grupo", key=f"ign_{group_id}"):
+            if st.button("👍 Não é Duplicado", key=f"ign_{group_id}"):
                 st.session_state[SK.IGNORED_GROUPS].add(group_id)
                 st.rerun()
 
@@ -132,8 +134,11 @@ def render_group(group_rows: List[Dict],
                 st.caption(f"{date_str} | {row.get('activity_status')} | {row.get('user_profile_name')}")
                 
                 if not is_p:
-                    score, _ = combined_score_fn(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
-                    st.markdown(f"<span class='similarity-badge badge-green'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
+                    score, details = combined_score_fn(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
+                    min_sim_pct = params['min_sim'] * 100
+                    badge_class = "badge-green" if score >= min_sim_pct + 5 else "badge-yellow" if score >= min_sim_pct else "badge-red"
+                    tooltip = f"Set: {details.get('set', 0):.0f}% | Sort: {details.get('sort', 0):.0f}% | Contain: {details.get('contain', 0):.0f}% | Bônus: {details.get('bonus', 0)}"
+                    st.markdown(f"<span class='similarity-badge {badge_class}' title='{html.escape(tooltip)}'>Similaridade: {score:.0f}%</span>", unsafe_allow_html=True)
 
                 st.text_area("Texto", row.get("Texto", ""), height=100, disabled=True, key=f"txt_{rid}_{group_id}")
 
