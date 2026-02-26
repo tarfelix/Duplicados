@@ -1,0 +1,32 @@
+# Cole no Coolify > Environment Variables (modo developer)
+# Apenas o que o app Verificador de Duplicados usa. Postgres, n8n, SharePoint foram omitidos.
+
+# --- MySQL (app Duplicados) ---
+DATABASE_HOST=40.88.40.110
+DATABASE_USER=tarcisio
+DATABASE_PASSWORD=123qwe
+DATABASE_NAME=zion_flow
+
+# --- API cancelamento Zion ---
+API_URL_API=https://zflowv2api.zionbyonset.com.br/api
+API_ENTITY_ID=3
+API_TOKEN=47497f45ea68b19b2f5bdab2542cd62af8dd4da6
+
+# --- Firebase (login e gestão de usuários) ---
+FIREBASE_CREDENTIALS_TYPE=service_account
+FIREBASE_CREDENTIALS_PROJECT_ID=verificador-duplicidade
+FIREBASE_CREDENTIALS_PRIVATE_KEY_ID=b594883c5657ba28e0a73ae13f1ee2cba98590b2
+FIREBASE_CREDENTIALS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEugIBADANBgkqhkiG9w0BAQEFAASCBKQwggSgAgEAAoIBAQCxID/D11zQ55fP\nFr+W2z/B4+UhJPcxxsymvbwllu+Jf4a9A0/OaQ/rLQgv2mZgesZzyUEAjNTmAfMf\n9bVDfa/86pZRdHZj/coAO4rR6v9M/rbMe3KhNyKetkqxKMpyUD77RL/eQR4ZUHj9\nA/19X2AaDxymtVAjI5zqYVQKGumqu+S1ykueX5MALyjLoC356O4dFaqT6qef/08a\n5iG3FAtrvw/y4q028G3HMeY9I0xviNbjJi3pxZTsjdLELnQ+5Glug8iAOrTmgGc9\n99MWZQFGtLFj0nTbc/edUprncYe7T5SY201Oa6g3d5+ioB0gUzmEP55vRArrFW4X\nWnVsT6jdAgMBAAECgf8GkqvLGLLZDb8UcEOr1XcIOuzFzhleP4JYrbHNs0wwTgsx\n+G19u2hb0c/79p7V9bhnk5BV9OPxpSDgjr2rQ37EY/AwFaJPE5vrZkpAf/f5Y3pl\nHC+ky+b8/MbIzDq3A0NTD7oPBVuYlOPof71oaaGnVeg6R4AxzaCFEheMSHNjYoXH\nKD4oxgG+8qL/heolG2BW9sxkptuIoFXM86EdZZLsJX+HDcA0AqNe0e6hWvoovOph\nzCI01XOnO2BfLSsIxxhdbbwsYvQaEt7xplYJzVVSBsdg68Dn9C1GSK7Ta+FMd8IF\nq0J9IJn8wLqoyDTFOtuXlcT5XUD4jsZfI/MiuzsCgYEA3/ueywVy1Jj5n4ScmtQb\nqX0ZhihfRz2WYjev7B1F5XkRbvZtqZDy2IubnuOmub+dBovn9DcPxrvwl/4eiyX1\nl7iyhEXZtjeYARnx8lxISGeImohg/tegQXdxLwvIt2aAAfrTHIemMnfKDRb3mVrJ\nhXN+6OVOIfD0eVIQljc+8cMCgYEAynH1DEek5k18EXiaItRg5787yfOfkUfluPZt\n/enxe6le7SN6/Lnm6Uovz2yvkkvO2pTffPb06XyBe1jY8OR/in9H1bBdkzTpIkvj\nYmWL+PBsyJKxRMhYNrsl76L0Gz32d/DYLIZyL0pW5cFAWe+uq2MiwWtpCF2GHxhp\nod9XsN8CgYBCxU78NN6blBLuQ+kvmsW4TAvc25IzuZ9oHjO6jqt0khfpXVsproVG\nmq/EuRbNztpvxitauUNhuksp9F6EmsdQ+IV3Ox+A26fbxDFFT89YjkzBzKAluIAU\npBfAr6GhUtQcQvrGSYX5C47XQh6Dv/XNa7XMlfcp1Rv8QsOhFE0WYwKBgCM8iIl1\noucPD4w+8J0lWCSeLXruM5Tm7b4u7mAmqwh6J3KhHVQFy4JJjl7NLRYKqdtz1B59\nIY3ORP9CLKhpLSXfF5LDGtZ3fCijCtXilOVke5rBpacyM+B63JSESXbAZzjjK808\nLX27s7pT066TwFRGchM2bdat6J1a82/gXvQDAoGAEk2/4lcqIOiA6utIUbsk/m57\nwpmYy8Z/OPhZgDRjgXLdeSnYhJ0Fa0iRsNKns568hAhz8TxpgLQNt8abv7PGPgDO\nWECX4dCkCricnMice56WbOdL8e8Vf4hG9rLiGxC0LTTKtQmRpsf9baOG0QzVr964\nElwjYD3gz92mGmaIStQ=\n-----END PRIVATE KEY-----"
+FIREBASE_CREDENTIALS_CLIENT_EMAIL=firebase-adminsdk-fbsvc@verificador-duplicidade.iam.gserviceaccount.com
+FIREBASE_CREDENTIALS_CLIENT_ID=117643831935512758766
+FIREBASE_CREDENTIALS_AUTH_URI=https://accounts.google.com/o/oauth2/auth
+FIREBASE_CREDENTIALS_TOKEN_URI=https://oauth2.googleapis.com/token
+FIREBASE_CREDENTIALS_AUTH_PROVIDER_X509_CERT_URL=https://www.googleapis.com/oauth2/v1/certs
+FIREBASE_CREDENTIALS_CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40verificador-duplicidade.iam.gserviceaccount.com
+FIREBASE_CREDENTIALS_UNIVERSE_DOMAIN=googleapis.com
+
+# --- Similaridade (opcional; padrões já estão no código) ---
+SIMILARITY_MIN_SIM_GLOBAL=90
+SIMILARITY_MIN_CONTAINMENT=55
+SIMILARITY_PRE_CUTOFF_DELTA=10
+SIMILARITY_DIFF_HARD_LIMIT=12000

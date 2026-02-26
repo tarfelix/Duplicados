@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from src.config import APP_TITLE, SK, DEFAULTS, TZ_SP, TZ_UTC, get_secret
 from src.database.mysql_client import get_mysql_engine, carregar_opcoes_mysql, carregar_dados_mysql
-from src.database.firestore import init_firestore, log_action
+from src.database.firestore import init_firestore, log_action, get_last_firestore_error
 from src.database.users_firestore import (
     authenticate, has_any_user, create_user, list_users, update_user_password,
     update_user_role, delete_user, get_user, verify_password,
@@ -22,6 +22,10 @@ mysql_engine = get_mysql_engine()
 # Sem Firebase não há gestão de usuários
 if db_firestore is None:
     st.error("Configure o Firebase (variáveis de ambiente do Coolify) para usar login e gestão de usuários. A coleção **verificador_users** será usada para armazenar usuários e senhas (com hash).")
+    err = get_last_firestore_error()
+    if err:
+        st.code(err, language=None)
+    st.caption("Dica: Confira se as variáveis FIREBASE_CREDENTIALS_* estão no serviço correto do Coolify, salve e faça **Redeploy**. Se o erro acima aparecer vazio, faça um novo deploy do repositório e tente de novo.")
     st.stop()
 
 if mysql_engine is None:
@@ -130,6 +134,9 @@ if st.session_state.get("_show_change_password"):
                         st.rerun()
                     else:
                         st.error(msg)
+        if st.button("Cancelar"):
+            st.session_state["_show_change_password"] = False
+            st.rerun()
     change_password_dialog()
 
 # Página: Gerenciar usuários (só admin)
