@@ -17,15 +17,26 @@ from src.config import get_secret
 COLLECTION_USERS = "verificador_users"
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
+# bcrypt limita a senha a 72 bytes
+def _truncate_password_72(s: str) -> str:
+    if not s:
+        return s
+    enc = s.encode("utf-8")
+    if len(enc) <= 72:
+        return s
+    return enc[:72].decode("utf-8", errors="ignore")
+
 def _hash_password(plain: str) -> str:
     if not bcrypt:
         raise RuntimeError("Instale passlib[bcrypt] para gestão de usuários.")
+    plain = _truncate_password_72(plain or "")
     return bcrypt.using(rounds=12).hash(plain)
 
 def verify_password(plain: str, hashed: str) -> bool:
     if not bcrypt or not hashed:
         return False
     try:
+        plain = _truncate_password_72(plain or "")
         return bcrypt.verify(plain, hashed)
     except Exception:
         return False
