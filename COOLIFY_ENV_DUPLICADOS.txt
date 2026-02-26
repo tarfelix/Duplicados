@@ -1,5 +1,8 @@
 # Cole no Coolify > Environment Variables (modo developer)
 # Apenas o que o app Verificador de Duplicados usa. Postgres, n8n, SharePoint foram omitidos.
+#
+# Se der erro "Unable to load PEM file / InvalidByte(8, 92)" na chave do Firebase,
+# use a OPÇÃO B no final do arquivo (uma variável FIREBASE_CREDENTIALS com o JSON completo).
 
 # --- MySQL (app Duplicados) ---
 DATABASE_HOST=40.88.40.110
@@ -13,6 +16,8 @@ API_ENTITY_ID=3
 API_TOKEN=47497f45ea68b19b2f5bdab2542cd62af8dd4da6
 
 # --- Firebase (login e gestão de usuários) ---
+# No Coolify a chave em variável separada costuma dar erro PEM. Use a OPÇÃO B abaixo (uma variável com o JSON completo).
+# No Streamlit Cloud use a aba Secrets em TOML (formato que funcionava para você).
 FIREBASE_CREDENTIALS_TYPE=service_account
 FIREBASE_CREDENTIALS_PROJECT_ID=verificador-duplicidade
 FIREBASE_CREDENTIALS_PRIVATE_KEY_ID=b594883c5657ba28e0a73ae13f1ee2cba98590b2
@@ -30,3 +35,11 @@ SIMILARITY_MIN_SIM_GLOBAL=90
 SIMILARITY_MIN_CONTAINMENT=55
 SIMILARITY_PRE_CUTOFF_DELTA=10
 SIMILARITY_DIFF_HARD_LIMIT=12000
+
+# --- OPÇÃO B (recomendado no Coolify): uma variável com o JSON completo ---
+# 1. Firebase Console > Configurações do projeto > Contas de serviço > Gerar nova chave privada (baixa um .json).
+# 2. No Coolify, REMOVA todas as variáveis FIREBASE_CREDENTIALS_* (type, project_id, private_key, etc.).
+# 3. Crie UMA variável:
+#    Nome: FIREBASE_CREDENTIALS
+#    Valor: cole o conteúdo INTEIRO do arquivo .json (pode ser em uma linha; o app faz o parse).
+# Assim a chave privada não passa por env vars separadas e evita o erro "Unable to load PEM file".

@@ -17,6 +17,24 @@ def get_last_firestore_error() -> Optional[str]:
     """Retorna a última mensagem de erro do Firebase (para exibir na UI)."""
     return _last_firestore_error
 
+def _parse_firebase_json(raw_json: str) -> Optional[dict]:
+    """Parse do JSON de credenciais; tolera aspas escapadas (ex.: Coolify envia \\\" em vez de \")."""
+    if not raw_json or not isinstance(raw_json, str):
+        return None
+    s = raw_json.strip()
+    if not s.startswith("{"):
+        return None
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    # Coolify/shell às vezes escapam as aspas: \" em vez de "
+    try:
+        fixed = s.replace('\\"', '"')
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        return None
+
 def _firebase_creds_from_env() -> Optional[dict]:
     """Monta o dict de credenciais a partir das variáveis de ambiente (Coolify/Docker)."""
     project_id = os.environ.get("FIREBASE_CREDENTIALS_PROJECT_ID") or get_secret("firebase_credentials.project_id")
@@ -48,33 +66,47 @@ def init_firestore():
     
     try:
         if not firebase_admin._apps:
-            # 1) Prioridade: variáveis de ambiente (Coolify/Docker)
-            creds_dict = _firebase_creds_from_env()
+            creds_dict = None
             
-            # 2) Fallback: get_secret (secrets.toml ou JSON em uma variável)
+            # 0) Streamlit Cloud: get_secret("firebase_credentials") devolve o dict da seção TOML
+            raw_creds = get_secret("firebase_credentials")
+            if isinstance(raw_creds, dict) and raw_creds.get("project_id") and raw_creds.get("private_key"):
+                creds_dict = dict(raw_creds)
+            
+            # 1) Uma variável com JSON completo (Coolify ou env)
             if not creds_dict:
-                raw = get_secret("firebase_credentials")
-                if isinstance(raw, str):
-                    try:
-                        creds_dict = json.loads(raw)
-                    except json.JSONDecodeError as e:
-                        _last_firestore_error = f"FIREBASE_CREDENTIALS (JSON) inválido: {e}"
+                raw_json = os.environ.get("FIREBASE_CREDENTIALS") or (get_secret("firebase_credentials") if isinstance(get_secret("firebase_credentials"), str) else None)
+                if isinstance(raw_json, str) and raw_json.strip().startswith("{"):
+                    creds_dict = _parse_firebase_json(raw_json)
+                    if creds_dict and not (isinstance(creds_dict, dict) and creds_dict.get("project_id")):
+                        creds_dict = None
+                    if not creds_dict and isinstance(raw_json, str) and raw_json.strip().startswith("{"):
+                        _last_firestore_error = (
+                            "FIREBASE_CREDENTIALS (JSON) inválido. No Coolify, confira se o valor é um JSON válido "
+                            "(aspas duplas). Se estiver escapado (\\\"), o app tenta corrigir automaticamente."
+                        )
                         logging.error(_last_firestore_error)
                         return None
-                if not isinstance(creds_dict, dict) or not creds_dict.get('project_id'):
-                    creds_dict = {
-                        "type": get_secret("firebase_credentials.type", "service_account"),
-                        "project_id": get_secret("firebase_credentials.project_id"),
-                        "private_key_id": get_secret("firebase_credentials.private_key_id"),
-                        "private_key": get_secret("firebase_credentials.private_key"),
-                        "client_email": get_secret("firebase_credentials.client_email"),
-                        "client_id": get_secret("firebase_credentials.client_id"),
-                        "auth_uri": get_secret("firebase_credentials.auth_uri", "https://accounts.google.com/o/oauth2/auth"),
-                        "token_uri": get_secret("firebase_credentials.token_uri", "https://oauth2.googleapis.com/token"),
-                        "auth_provider_x509_cert_url": get_secret("firebase_credentials.auth_provider_x509_cert_url"),
-                        "client_x509_cert_url": get_secret("firebase_credentials.client_x509_cert_url"),
-                        "universe_domain": get_secret("firebase_credentials.universe_domain", "googleapis.com")
-                    }
+            
+            # 2) Variáveis de ambiente separadas (Coolify)
+            if not creds_dict:
+                creds_dict = _firebase_creds_from_env()
+            
+            # 3) Fallback: montar a partir de get_secret por chave
+            if not creds_dict or not creds_dict.get('project_id') or not creds_dict.get('private_key'):
+                creds_dict = {
+                    "type": get_secret("firebase_credentials.type", "service_account"),
+                    "project_id": get_secret("firebase_credentials.project_id"),
+                    "private_key_id": get_secret("firebase_credentials.private_key_id"),
+                    "private_key": get_secret("firebase_credentials.private_key"),
+                    "client_email": get_secret("firebase_credentials.client_email"),
+                    "client_id": get_secret("firebase_credentials.client_id"),
+                    "auth_uri": get_secret("firebase_credentials.auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+                    "token_uri": get_secret("firebase_credentials.token_uri", "https://oauth2.googleapis.com/token"),
+                    "auth_provider_x509_cert_url": get_secret("firebase_credentials.auth_provider_x509_cert_url"),
+                    "client_x509_cert_url": get_secret("firebase_credentials.client_x509_cert_url"),
+                    "universe_domain": get_secret("firebase_credentials.universe_domain", "googleapis.com")
+                }
 
             if not creds_dict or not creds_dict.get('project_id') or not creds_dict.get('private_key'):
                 _last_firestore_error = (
@@ -83,9 +115,12 @@ def init_firestore():
                 )
                 return None
             
-            # Corrige a private_key (escapes de \n)
-            if isinstance(creds_dict.get('private_key'), str):
-                creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+            # Normaliza a private_key: \n literal -> quebra de linha (Coolify pode enviar \\n ou \\\\n)
+            pk = creds_dict.get("private_key")
+            if isinstance(pk, str):
+                pk = pk.replace("\r\n", "\n").replace("\r", "\n")
+                pk = pk.replace("\\\\n", "\n").replace("\\n", "\n")  # \\n e \n -> newline
+                creds_dict["private_key"] = pk.strip()
             
             cred = credentials.Certificate(creds_dict)
             firebase_admin.initialize_app(cred)
