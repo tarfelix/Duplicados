@@ -18,25 +18,31 @@ COLLECTION_USERS = "verificador_users"
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 # bcrypt limita a senha a 72 bytes
-def _truncate_password_72(s: str) -> str:
+def _truncate_password_72(s) -> str:
+    if s is None:
+        return ""
+    s = str(s) if not isinstance(s, str) else s
     if not s:
-        return s
-    enc = s.encode("utf-8")
+        return ""
+    try:
+        enc = s.encode("utf-8")
+    except (AttributeError, UnicodeEncodeError):
+        return ""
     if len(enc) <= 72:
         return s
     return enc[:72].decode("utf-8", errors="ignore")
 
-def _hash_password(plain: str) -> str:
+def _hash_password(plain) -> str:
     if not bcrypt:
         raise RuntimeError("Instale passlib[bcrypt] para gestão de usuários.")
-    plain = _truncate_password_72(plain or "")
+    plain = _truncate_password_72(plain)
     return bcrypt.using(rounds=12).hash(plain)
 
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain, hashed: str) -> bool:
     if not bcrypt or not hashed:
         return False
     try:
-        plain = _truncate_password_72(plain or "")
+        plain = _truncate_password_72(plain)
         return bcrypt.verify(plain, hashed)
     except Exception:
         return False
@@ -84,10 +90,12 @@ def create_user(db, username: str, password: str, role: str = "user") -> tuple[b
         return False, "Nome de usuário só pode conter letras, números, ponto, hífen e underscore."
     if len(username) < 2:
         return False, "Nome de usuário muito curto."
+    password = str(password).strip() if password is not None else ""
     if not password or len(password) < 4:
         return False, "Senha deve ter no mínimo 4 caracteres."
     if role not in ("admin", "user"):
         role = "user"
+    password = _truncate_password_72(str(password))
     username_lower = username.lower()
     try:
         ref = db.collection(COLLECTION_USERS).document(username_lower)
@@ -121,6 +129,7 @@ def update_user_password(db, username: str, new_password: str) -> tuple[bool, st
     username_lower = username.strip().lower()
     if not new_password or len(new_password) < 4:
         return False, "Nova senha deve ter no mínimo 4 caracteres."
+    new_password = _truncate_password_72(str(new_password))
     try:
         ref = db.collection(COLLECTION_USERS).document(username_lower)
         doc = ref.get()
