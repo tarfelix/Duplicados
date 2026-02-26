@@ -1,0 +1,184 @@
+"""
+Gestão de usuários do Verificador de Duplicidade.
+Usuários são armazenados no Firestore (coleção verificador_users).
+Senhas são armazenadas com hash bcrypt.
+"""
+import logging
+import re
+from typing import Optional, List, Dict, Any
+
+try:
+    from passlib.hash import bcrypt
+except ImportError:
+    bcrypt = None
+
+from src.config import get_secret
+
+COLLECTION_USERS = "verificador_users"
+USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
+def _hash_password(plain: str) -> str:
+    if not bcrypt:
+        raise RuntimeError("Instale passlib[bcrypt] para gestão de usuários.")
+    return bcrypt.using(rounds=12).hash(plain)
+
+def verify_password(plain: str, hashed: str) -> bool:
+    if not bcrypt or not hashed:
+        return False
+    try:
+        return bcrypt.verify(plain, hashed)
+    except Exception:
+        return False
+
+def get_user(db, username: str) -> Optional[Dict[str, Any]]:
+    """Retorna o documento do usuário ou None."""
+    if not db or not username:
+        return None
+    try:
+        doc = db.collection(COLLECTION_USERS).document(username.strip().lower()).get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+    except Exception as e:
+        logging.error(f"Erro ao buscar usuário {username}: {e}")
+        return None
+
+def list_users(db) -> List[Dict[str, Any]]:
+    """Lista todos os usuários (username, role, created_at). Sem expor senha."""
+    if not db:
+        return []
+    try:
+        docs = db.collection(COLLECTION_USERS).stream()
+        return [
+            {"username": doc.id, "role": doc.to_dict().get("role", "user"), "created_at": doc.to_dict().get("created_at")}
+            for doc in docs
+        ]
+    except Exception as e:
+        logging.error(f"Erro ao listar usuários: {e}")
+        return []
+
+def create_user(db, username: str, password: str, role: str = "user") -> tuple[bool, str]:
+    """
+    Cria um usuário. role: 'admin' ou 'user'.
+    Retorna (sucesso, mensagem).
+    """
+    if not db:
+        return False, "Firebase não configurado."
+    if not bcrypt:
+        return False, "Dependência passlib[bcrypt] não instalada."
+    username = username.strip()
+    if not username:
+        return False, "Nome de usuário obrigatório."
+    if not USERNAME_PATTERN.match(username):
+        return False, "Nome de usuário só pode conter letras, números, ponto, hífen e underscore."
+    if len(username) < 2:
+        return False, "Nome de usuário muito curto."
+    if not password or len(password) < 4:
+        return False, "Senha deve ter no mínimo 4 caracteres."
+    if role not in ("admin", "user"):
+        role = "user"
+    username_lower = username.lower()
+    try:
+        ref = db.collection(COLLECTION_USERS).document(username_lower)
+        if ref.get().exists:
+            return False, "Este nome de usuário já existe."
+        from firebase_admin import firestore
+        ref.set({
+            "username": username_lower,
+            "password_hash": _hash_password(password),
+            "role": role,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        })
+        return True, "Usuário criado com sucesso."
+    except Exception as e:
+        logging.exception(e)
+        return False, f"Erro ao criar usuário: {e}"
+
+def _get_timestamp():
+    try:
+        from firebase_admin import firestore
+        return firestore.SERVER_TIMESTAMP
+    except Exception:
+        return None
+
+def update_user_password(db, username: str, new_password: str) -> tuple[bool, str]:
+    """Altera a senha de um usuário (admin ou o próprio usuário com senha atual verificada antes)."""
+    if not db:
+        return False, "Firebase não configurado."
+    if not bcrypt:
+        return False, "Dependência passlib[bcrypt] não instalada."
+    username_lower = username.strip().lower()
+    if not new_password or len(new_password) < 4:
+        return False, "Nova senha deve ter no mínimo 4 caracteres."
+    try:
+        ref = db.collection(COLLECTION_USERS).document(username_lower)
+        doc = ref.get()
+        if not doc.exists:
+            return False, "Usuário não encontrado."
+        ref.update({
+            "password_hash": _hash_password(new_password),
+            "updated_at": _get_timestamp(),
+        })
+        return True, "Senha alterada com sucesso."
+    except Exception as e:
+        logging.exception(e)
+        return False, f"Erro ao alterar senha: {e}"
+
+def update_user_role(db, username: str, role: str) -> tuple[bool, str]:
+    """Altera o role de um usuário (apenas admin)."""
+    if not db:
+        return False, "Firebase não configurado."
+    if role not in ("admin", "user"):
+        return False, "Role inválido."
+    username_lower = username.strip().lower()
+    try:
+        ref = db.collection(COLLECTION_USERS).document(username_lower)
+        if not ref.get().exists:
+            return False, "Usuário não encontrado."
+        ref.update({"role": role, "updated_at": _get_timestamp()})
+        return True, "Perfil atualizado."
+    except Exception as e:
+        logging.exception(e)
+        return False, f"Erro ao atualizar perfil: {e}"
+
+def delete_user(db, username: str) -> tuple[bool, str]:
+    """Remove um usuário. Não permite excluir o próprio admin se for o único admin."""
+    if not db:
+        return False, "Firebase não configurado."
+    username_lower = username.strip().lower()
+    try:
+        ref = db.collection(COLLECTION_USERS).document(username_lower)
+        doc = ref.get()
+        if not doc.exists:
+            return False, "Usuário não encontrado."
+        data = doc.to_dict()
+        if data.get("role") == "admin":
+            admins = [u["username"] for u in list_users(db) if u.get("role") == "admin"]
+            if len(admins) <= 1:
+                return False, "Não é possível excluir o único administrador."
+        ref.delete()
+        return True, "Usuário excluído."
+    except Exception as e:
+        logging.exception(e)
+        return False, f"Erro ao excluir usuário: {e}"
+
+def authenticate(db, username: str, password: str) -> Optional[Dict[str, Any]]:
+    """
+    Autentica usuário. Retorna dict com username e role se ok, senão None.
+    """
+    user = get_user(db, username)
+    if not user:
+        return None
+    if not verify_password(password, user.get("password_hash") or ""):
+        return None
+    return {"username": user.get("username", username), "role": user.get("role", "user")}
+
+def has_any_user(db) -> bool:
+    """Verifica se já existe pelo menos um usuário (para primeiro acesso)."""
+    if not db:
+        return False
+    try:
+        ref = db.collection(COLLECTION_USERS).limit(1)
+        return len(list(ref.stream())) > 0
+    except Exception:
+        return False

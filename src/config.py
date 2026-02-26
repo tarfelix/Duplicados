@@ -12,6 +12,7 @@ SUFFIX = "_v5_final"
 
 class SK:
     USERNAME = f"username_{SUFFIX}"
+    USER_ROLE = f"user_role_{SUFFIX}"
     SIMILARITY_CACHE = f"simcache_{SUFFIX}"
     PAGE_NUMBER = f"page_{SUFFIX}"
     GROUP_STATES = f"group_states_{SUFFIX}"
