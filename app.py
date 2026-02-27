@@ -12,6 +12,17 @@ from src.components.ui import apply_styles, render_diff, render_group
 from src.core.actions import export_groups_csv, process_cancellations
 from src.api.client import get_api_client
 
+
+def _password_max_72(s):
+    """Garante senha com no máximo 72 bytes (limite bcrypt)."""
+    if s is None:
+        return ""
+    s = (s if isinstance(s, str) else str(s)).strip()
+    if len(s.encode("utf-8")) > 72:
+        s = s.encode("utf-8")[:72].decode("utf-8", errors="ignore")
+    return s
+
+
 # --- Initialize ---
 st.set_page_config(layout="wide", page_title=APP_TITLE)
 apply_styles()
@@ -47,7 +58,8 @@ if not has_any_user(db_firestore):
             elif p != p2:
                 st.error("As senhas não coincidem.")
             else:
-                ok, msg = create_user(db_firestore, u, p, role="admin")
+                p_str = _password_max_72(p)
+                ok, msg = create_user(db_firestore, u, p_str, role="admin")
                 if ok:
                     st.session_state[SK.USERNAME] = u.strip().lower()
                     st.session_state[SK.USER_ROLE] = "admin"
@@ -127,7 +139,7 @@ if st.session_state.get("_show_change_password"):
                 if not user_doc or not verify_password(current, user_doc.get("password_hash") or ""):
                     st.error("Senha atual incorreta.")
                 else:
-                    ok, msg = update_user_password(db_firestore, st.session_state[SK.USERNAME], new1)
+                    ok, msg = update_user_password(db_firestore, st.session_state[SK.USERNAME], _password_max_72(new1))
                     if ok:
                         st.success(msg)
                         st.session_state["_show_change_password"] = False
@@ -183,7 +195,8 @@ if st.session_state.get(SK.USER_ROLE) == "admin" and st.session_state.get("_page
         new_password = st.text_input("Senha", type="password")
         new_role = st.selectbox("Perfil", ["user", "admin"])
         if st.form_submit_button("Criar"):
-            ok, msg = create_user(db_firestore, new_username, new_password, role=new_role)
+            p_ok = _password_max_72(new_password)
+            ok, msg = create_user(db_firestore, new_username, p_ok, role=new_role)
             if ok:
                 st.success(msg)
                 st.rerun()
@@ -200,7 +213,7 @@ if st.session_state.get(SK.USER_ROLE) == "admin" and st.session_state.get("_page
                 elif new_p != new_p2:
                     st.error("As senhas não coincidem.")
                 else:
-                    ok, msg = update_user_password(db_firestore, who, new_p)
+                    ok, msg = update_user_password(db_firestore, who, _password_max_72(new_p))
                     if ok:
                         st.success(msg)
                         st.session_state.pop("_edit_user", None)

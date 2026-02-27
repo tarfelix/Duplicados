@@ -36,6 +36,9 @@ def _hash_password(plain) -> str:
     if not bcrypt:
         raise RuntimeError("Instale passlib[bcrypt] para gestão de usuários.")
     plain = _truncate_password_72(plain)
+    # passlib/bcrypt aceita str; garantir tamanho em bytes
+    b = plain.encode("utf-8", errors="replace")[:72]
+    plain = b.decode("utf-8", errors="ignore")
     return bcrypt.using(rounds=12).hash(plain)
 
 def verify_password(plain, hashed: str) -> bool:
@@ -43,6 +46,8 @@ def verify_password(plain, hashed: str) -> bool:
         return False
     try:
         plain = _truncate_password_72(plain)
+        b = plain.encode("utf-8", errors="replace")[:72]
+        plain = b.decode("utf-8", errors="ignore")
         return bcrypt.verify(plain, hashed)
     except Exception:
         return False
