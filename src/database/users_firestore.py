@@ -1,54 +1,42 @@
 """
 Gestão de usuários do Verificador de Duplicidade.
 Usuários são armazenados no Firestore (coleção verificador_users).
-Senhas são armazenadas com hash bcrypt.
+Senhas são armazenadas com hash seguro usando passlib.
 """
 import logging
 import re
 from typing import Optional, List, Dict, Any
 
 try:
-    from passlib.hash import bcrypt
+    from passlib.context import CryptContext
 except ImportError:
-    bcrypt = None
-
-from src.config import get_secret
+    CryptContext = None
 
 COLLECTION_USERS = "verificador_users"
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
-# bcrypt limita a senha a 72 bytes
-def _truncate_password_72(s) -> str:
-    if s is None:
-        return ""
-    s = str(s) if not isinstance(s, str) else s
-    if not s:
-        return ""
-    try:
-        enc = s.encode("utf-8")
-    except (AttributeError, UnicodeEncodeError):
-        return ""
-    if len(enc) <= 72:
-        return s
-    return enc[:72].decode("utf-8", errors="ignore")
+PWD_CONTEXT = (
+    CryptContext(
+        schemes=["pbkdf2_sha256", "bcrypt"],
+        default="pbkdf2_sha256",
+        deprecated="auto",
+    )
+    if CryptContext
+    else None
+)
 
 def _hash_password(plain) -> str:
-    if not bcrypt:
-        raise RuntimeError("Instale passlib[bcrypt] para gestão de usuários.")
-    plain = _truncate_password_72(plain)
-    # passlib/bcrypt aceita str; garantir tamanho em bytes
-    b = plain.encode("utf-8", errors="replace")[:72]
-    plain = b.decode("utf-8", errors="ignore")
-    return bcrypt.using(rounds=12).hash(plain)
+    if not PWD_CONTEXT:
+        raise RuntimeError("Instale passlib para gestão de usuários.")
+    plain = str(plain) if plain is not None else ""
+    return PWD_CONTEXT.hash(plain)
 
 def verify_password(plain, hashed: str) -> bool:
-    if not bcrypt or not hashed:
+    if not PWD_CONTEXT or not hashed:
         return False
     try:
-        plain = _truncate_password_72(plain)
-        b = plain.encode("utf-8", errors="replace")[:72]
-        plain = b.decode("utf-8", errors="ignore")
-        return bcrypt.verify(plain, hashed)
+        plain = str(plain) if plain is not None else ""
+        return PWD_CONTEXT.verify(plain, hashed)
     except Exception:
         return False
 
@@ -86,8 +74,8 @@ def create_user(db, username: str, password: str, role: str = "user") -> tuple[b
     """
     if not db:
         return False, "Firebase não configurado."
-    if not bcrypt:
-        return False, "Dependência passlib[bcrypt] não instalada."
+    if not PWD_CONTEXT:
+        return False, "Dependência passlib não instalada."
     username = username.strip()
     if not username:
         return False, "Nome de usuário obrigatório."
@@ -100,7 +88,6 @@ def create_user(db, username: str, password: str, role: str = "user") -> tuple[b
         return False, "Senha deve ter no mínimo 4 caracteres."
     if role not in ("admin", "user"):
         role = "user"
-    password = _truncate_password_72(str(password))
     username_lower = username.lower()
     try:
         ref = db.collection(COLLECTION_USERS).document(username_lower)
@@ -129,12 +116,12 @@ def update_user_password(db, username: str, new_password: str) -> tuple[bool, st
     """Altera a senha de um usuário (admin ou o próprio usuário com senha atual verificada antes)."""
     if not db:
         return False, "Firebase não configurado."
-    if not bcrypt:
-        return False, "Dependência passlib[bcrypt] não instalada."
+    if not PWD_CONTEXT:
+        return False, "Dependência passlib não instalada."
     username_lower = username.strip().lower()
     if not new_password or len(new_password) < 4:
         return False, "Nova senha deve ter no mínimo 4 caracteres."
-    new_password = _truncate_password_72(str(new_password))
+    new_password = str(new_password)
     try:
         ref = db.collection(COLLECTION_USERS).document(username_lower)
         doc = ref.get()
