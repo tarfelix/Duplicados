@@ -67,7 +67,7 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
         small, big = (tokens_a, set(tokens_b)) if len(tokens_a) <= len(tokens_b) else (tokens_b, set(tokens_a))
         contain = 100.0 * (sum(1 for t in small if t in big) / len(small))
 
-    # Penalidade de tamanho
+    # Penalidade de tamanho (mais suave quando processo/órgão coincidem)
     len_a, len_b = len(a_norm), len(b_norm)
     lp = 1.0
     if len_a == 0 or len_b == 0:
@@ -75,16 +75,21 @@ def combined_score(a_norm: str, b_norm: str, meta_a: Dict[str,str], meta_b: Dict
     elif len_a > 0 and len_b > 0:
         diff_ratio = abs(len_a - len_b) / max(len_a, len_b)
         lp = max(0.7, 1.0 - diff_ratio * 0.4)
+        # Se mesmo processo ou órgão, penalidade menor (reduz falsos negativos)
+        if (meta_a.get("processo") and meta_a.get("processo") == meta_b.get("processo")) or (meta_a.get("orgao") and meta_a.get("orgao") == meta_b.get("orgao")):
+            lp = max(lp, 0.85)
     
-    # Bônus por campos
-    bonus = 0
-    if meta_a.get("processo") and meta_a.get("processo") == meta_b.get("processo"): bonus += 6
-    if meta_a.get("orgao") and meta_a.get("orgao") == meta_b.get("orgao"): bonus += 3
-    if meta_a.get("tipo_doc") and meta_a.get("tipo_doc") == meta_b.get("tipo_doc"): bonus += 3
-    if meta_a.get("tipo_com") and meta_a.get("tipo_com") == meta_b.get("tipo_com"): bonus += 2
-    
+    # Bônus por campos (limitado e só quando o texto já é bem parecido, para reduzir falsos positivos)
     base_score = 0.6 * set_ratio + 0.2 * sort_ratio + 0.2 * contain
-    final_score = max(0.0, min(100.0, base_score * lp + bonus))
+    base_after_lp = base_score * lp
+    bonus = 0
+    if base_after_lp >= 80:  # Só soma bônus quando similaridade base já é alta
+        if meta_a.get("processo") and meta_a.get("processo") == meta_b.get("processo"): bonus += 6
+        if meta_a.get("orgao") and meta_a.get("orgao") == meta_b.get("orgao"): bonus += 3
+        if meta_a.get("tipo_doc") and meta_a.get("tipo_doc") == meta_b.get("tipo_doc"): bonus += 3
+        if meta_a.get("tipo_com") and meta_a.get("tipo_com") == meta_b.get("tipo_com"): bonus += 2
+        bonus = min(bonus, 5)  # Teto de bônus para não puxar pares fracos acima do limiar
+    final_score = max(0.0, min(100.0, base_after_lp + bonus))
     
     return final_score, {"set": set_ratio, "sort": sort_ratio, "contain": contain, "len_pen": lp, "bonus": bonus}
 

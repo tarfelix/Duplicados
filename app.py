@@ -12,6 +12,12 @@ from src.components.ui import apply_styles, render_diff, render_group
 from src.core.actions import export_groups_csv, process_cancellations
 from src.api.client import get_api_client
 
+try:
+    from src.services.ai_explain import explain_differences, is_ai_available
+except Exception:
+    explain_differences = None
+    is_ai_available = lambda: False
+
 
 # --- Initialize ---
 st.set_page_config(layout="wide", page_title=APP_TITLE)
@@ -232,9 +238,47 @@ dias_hist = st.sidebar.number_input("Dias de Histórico", 7, 365, 10)
 pastas_sel = st.sidebar.multiselect("Pastas", pastas_opts)
 status_sel = st.sidebar.multiselect("Status", status_opts, default=[s for s in status_opts if "Cancelad" not in s])
 
-strict_mode = st.sidebar.toggle("Modo Estrito", value=True)
+strict_mode = st.sidebar.toggle("Modo Estrito", value=True, help="Critérios mais rígidos de similaridade por pasta (quando configurado).")
 use_cnj = st.sidebar.toggle("Filtrar por CNJ", value=True)
 dry_run = st.sidebar.toggle("Modo Teste (Dry-run)", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Filtros de exibição")
+# Persistir na sessão para não resetar a cada refresh
+if "_hide_all_closed" not in st.session_state:
+    st.session_state["_hide_all_closed"] = True
+hide_all_closed = st.sidebar.toggle(
+    "Ocultar grupos em que todas estão fechadas",
+    value=st.session_state["_hide_all_closed"],
+    help="Exibe apenas grupos que tenham pelo menos uma atividade com status Aberta.",
+    key="toggle_hide_closed"
+)
+st.session_state["_hide_all_closed"] = hide_all_closed
+
+raw_min_sim_secret = float(get_secret("similarity.min_sim_global", 0.9))
+default_min_sim_pct = int(raw_min_sim_secret * 100) if raw_min_sim_secret <= 1 else int(raw_min_sim_secret)
+default_min_sim_pct = max(0, min(100, default_min_sim_pct))
+min_sim_pct_ui = st.sidebar.slider(
+    "Similaridade mínima (%)",
+    0, 100, default_min_sim_pct, 1,
+    help="Mostrar apenas grupos cuja similaridade entre itens seja a partir deste valor.",
+    key="slider_min_sim"
+)
+min_containment_default = int(get_secret("similarity.min_containment", 55))
+min_containment_ui = st.sidebar.slider(
+    "Containment mínimo (%)",
+    0, 100, min_containment_default, 1,
+    help="Exigência mínima de sobreposição de termos entre os textos (afeta a formação dos grupos).",
+    key="slider_min_containment"
+)
+
+with st.sidebar.expander("Como funciona?"):
+    st.caption("""
+    **Duplicata:** mesma publicação ou aviso apareceu mais de uma vez.
+    **Principal:** o item que será mantido; os outros podem ser marcados para cancelamento.
+    **Similaridade:** quanto maior o %, mais parecidos são os textos.
+    **Modo Estrito:** usa critérios mais rígidos por pasta quando configurado no servidor.
+    """)
 
 # --- Data Loading ---
 with st.spinner("Carregando atividades..."):
@@ -243,10 +287,9 @@ with st.spinner("Carregando atividades..."):
 if df.empty:
     st.info("Nenhum dado encontrado para os filtros selecionados.")
 else:
-    raw_min_sim = float(get_secret("similarity.min_sim_global", 0.9))
     params = {
-        'min_sim': raw_min_sim / 100.0 if raw_min_sim > 1 else raw_min_sim,
-        'min_containment': int(get_secret("similarity.min_containment", 55)),
+        'min_sim': min_sim_pct_ui / 100.0,
+        'min_containment': min_containment_ui,
         'use_cnj': use_cnj,
         'diff_limit': int(get_secret("similarity.diff_hard_limit", 12000))
     }
@@ -261,12 +304,27 @@ else:
         groups = create_groups(df, params)
     ignored = st.session_state.get(SK.IGNORED_GROUPS, set())
     groups = [g for g in groups if g[0]["activity_id"] not in ignored]
+
+    # Filtro: só exibir grupos com pelo menos uma atividade Aberta (se toggle ativo)
+    if hide_all_closed:
+        groups_before_filter = len(groups)
+        groups = [g for g in groups if any(r.get("activity_status") == "Aberta" for r in g)]
+        hidden_closed_count = groups_before_filter - len(groups)
+    else:
+        hidden_closed_count = 0
+
+    # Ordenação: mais abertas primeiro, depois por data mais recente
+    def sort_key(g):
+        open_count = sum(1 for r in g if r.get("activity_status") == "Aberta")
+        latest = max((pd.to_datetime(r.get("activity_date"), errors="coerce") for r in g), default=pd.Timestamp.min)
+        return (-open_count, -latest.value)
+    groups = sorted(groups, key=sort_key)
     
     # --- Metrics ---
     if dry_run:
         st.warning("Modo Teste (Dry-run) ativo – nenhum cancelamento será enviado à API.")
     
-    st.title(f"🔍 {len(groups)} Grupos de Duplicatas")
+    st.title(f"🔍 {len(groups)} Grupos de duplicatas")
     m1, m2, m3 = st.columns(3)
     abertas_total = sum(1 for _, row in df.iterrows() if row.get("activity_status") == "Aberta")
     total_marcados = sum(len(state.get('cancelados', [])) for state in st.session_state[SK.GROUP_STATES].values())
@@ -274,9 +332,17 @@ else:
     m1.metric("Grupos", len(groups))
     m2.metric("Abertas", abertas_total)
     m3.metric("Marcados", total_marcados)
+
+    # Resumo de filtros e contador de ocultos
+    resumo_parts = [f"Exibindo **{len(groups)}** grupos (similaridade ≥ {min_sim_pct_ui}%)"]
+    if hide_all_closed:
+        resumo_parts.append("apenas grupos com pelo menos 1 atividade aberta")
+    st.caption(" | ".join(resumo_parts))
+    if hidden_closed_count > 0:
+        st.caption(f"ℹ️ {hidden_closed_count} grupo(s) não exibido(s) (todas as atividades fechadas). Desative o filtro na barra lateral para ver todos.")
     
     if len(groups) == 0 and not df.empty:
-        st.info("Nenhum grupo de duplicatas encontrado com os critérios atuais. Tente ajustar os filtros ou o modo estrito.")
+        st.info("Nenhum grupo de duplicatas encontrado com os critérios atuais. Ajuste os filtros, a similaridade mínima ou desative 'Ocultar grupos em que todas estão fechadas'.")
     
     st.divider()
 
@@ -307,11 +373,11 @@ else:
                 })
         
         if not to_cancel:
-            st.info("Nenhuma atividade marcada.")
+            st.info("Nenhuma atividade marcada para cancelar.")
             return
             
         st.warning("Atenção: esta ação é irreversível.")
-        st.warning(f"Você está prestes a cancelar **{len(to_cancel)}** atividades.")
+        st.warning(f"Você está prestes a cancelar **{len(to_cancel)}** atividades. A que você escolheu como principal permanecerá.")
         st.table(pd.DataFrame(to_cancel))
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
@@ -324,15 +390,16 @@ else:
                 st.rerun()
 
     # --- Group Rendering ---
+    explain_fn = explain_differences if (explain_differences and is_ai_available()) else None
     for group in groups:
-        render_group(group, params, get_best_principal_id, combined_score)
+        render_group(group, params, get_best_principal_id, combined_score, explain_fn=explain_fn)
 
     st.divider()
-    st.header("⚡ Ações em massa")
-    st.caption("Exporte os grupos para CSV ou processe os cancelamentos marcados.")
+    st.header("Ações em massa")
+    st.caption("Exporte os grupos exibidos para CSV ou processe os cancelamentos marcados.")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.download_button("⬇️ Baixar CSV", data=export_groups_csv(groups), file_name="duplicatas.csv", use_container_width=True)
+        st.download_button("Baixar CSV (grupos exibidos)", data=export_groups_csv(groups), file_name="duplicatas.csv", use_container_width=True)
     with col_b:
         if st.button("🚀 Processar Marcados", type="primary", use_container_width=True):
             confirm_dialog()

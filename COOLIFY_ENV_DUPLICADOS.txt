@@ -36,7 +36,11 @@ SIMILARITY_MIN_CONTAINMENT=55
 SIMILARITY_PRE_CUTOFF_DELTA=10
 SIMILARITY_DIFF_HARD_LIMIT=12000
 
-# --- OPÇÃO B (recomendado no Coolify): uma variável com o JSON completo ---
+# --- IA: Explicar diferenças (opcional) ---
+# Se definir OPENAI_API_KEY, o botão "Explicar diferenças em linguagem simples" aparece no diálogo Ver diferenças.
+# Azure: AI_PROVIDER=azure, AZURE_OPENAI_ENDPOINT=..., AZURE_OPENAI_API_KEY=..., AZURE_OPENAI_DEPLOYMENT=gpt-4o
+
+# --- OPÇÃO B (recomendado no Coolify): uma variável com o JSON completo --- (recomendado no Coolify): uma variável com o JSON completo ---
 # 1. Firebase Console > Configurações do projeto > Contas de serviço > Gerar nova chave privada (baixa um .json).
 # 2. No Coolify, REMOVA todas as variáveis FIREBASE_CREDENTIALS_* (type, project_id, private_key, etc.).
 # 3. Crie UMA variável:
