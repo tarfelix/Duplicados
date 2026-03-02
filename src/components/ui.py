@@ -144,7 +144,7 @@ def render_group(group_rows: List[Dict],
             with c1:
                 dt = pd.to_datetime(row.get("activity_date")).tz_localize(TZ_UTC).tz_convert(TZ_SP) if row.get("activity_date") else None
                 date_str = dt.strftime('%d/%m/%Y %H:%M') if dt else "N/A"
-                                st.markdown(f"**ID:** `{rid}` { '⭐ **Manter este**' if is_p else ''} { '🗑️ **Marcado para cancelar**' if is_c else ''}")
+                st.markdown(f"**ID:** `{rid}` { '⭐ **Manter este**' if is_p else ''} { '🗑️ **Marcado para cancelar**' if is_c else ''}")
                 st.caption(f"{date_str} | {row.get('activity_status')} | {row.get('user_profile_name')}")
                 
                 if not is_p:
