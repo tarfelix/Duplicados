@@ -27,6 +27,7 @@ def get_mysql_engine() -> Optional[Engine]:
             settings.mysql_url,
             pool_pre_ping=True,
             pool_recycle=3600,
+            connect_args={"connection_timeout": 5, "connect_timeout": 5},
         )
         with _mysql_engine.connect():
             pass
