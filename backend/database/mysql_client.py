@@ -23,16 +23,17 @@ def get_mysql_engine() -> Optional[Engine]:
         return None
 
     try:
-        _mysql_engine = create_engine(
+        engine = create_engine(
             settings.mysql_url,
             pool_pre_ping=True,
             pool_recycle=3600,
-            connect_args={"connection_timeout": 5, "connect_timeout": 5},
+            connect_args={"connection_timeout": 10, "connect_timeout": 10},
         )
-        with _mysql_engine.connect():
+        with engine.connect():
             pass
+        _mysql_engine = engine
         return _mysql_engine
-    except exc.SQLAlchemyError as e:
+    except Exception as e:
         logging.exception(f"MySQL connection error: {e}")
         return None
 
