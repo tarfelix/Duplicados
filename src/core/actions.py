@@ -38,7 +38,7 @@ def process_cancellations(to_cancel_list: List[Dict], user: str, api_client: Any
         
         try:
             response = api_client.activity_canceled(activity_id=act_id, user_name=user, principal_id=principal_id)
-            if response and (response.get("ok") or response.get("success") or response.get("code") == '200'):
+            if response and (response.get("ok") or response.get("success") or response.get("code") == '200' or response.get("code") == 200):
                 results["ok"] += 1
                 log_fn(user, "process_cancellation_success", item)
             else:

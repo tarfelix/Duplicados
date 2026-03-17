@@ -99,6 +99,8 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
     # Cache logic locally simplified for module
     work_df = df.copy()
     stopwords_extra = get_secret("similarity.stopwords_extra", [])
+    if isinstance(stopwords_extra, str):
+        stopwords_extra = [s.strip() for s in stopwords_extra.split(",") if s.strip()]
     work_df["_meta"] = work_df["Texto"].apply(extract_meta)
     work_df["_norm"] = work_df["Texto"].apply(lambda t: normalize_text(t, stopwords_extra))
 

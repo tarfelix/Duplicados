@@ -280,6 +280,9 @@ with st.sidebar.expander("Como funciona?"):
     **Modo Estrito:** usa critérios mais rígidos por pasta quando configurado no servidor.
     """)
 
+if not get_api_client(dry_run=False):
+    st.sidebar.warning("API Zion não configurada. Cancelamentos não estarão disponíveis.")
+
 # --- Data Loading ---
 with st.spinner("Carregando atividades..."):
     df = carregar_dados_mysql(mysql_engine, dias_hist, pastas_sel, status_sel)
@@ -319,7 +322,7 @@ else:
         latest = max((pd.to_datetime(r.get("activity_date"), errors="coerce") for r in g), default=pd.Timestamp.min)
         return (-open_count, -latest.value)
     groups = sorted(groups, key=sort_key)
-    
+
     # --- Metrics ---
     if dry_run:
         st.warning("Modo Teste (Dry-run) ativo – nenhum cancelamento será enviado à API.")
