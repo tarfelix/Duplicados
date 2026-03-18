@@ -1,6 +1,7 @@
 networks:
   coolify:
     external: true
+  default:
 
 services:
   backend:
@@ -12,6 +13,7 @@ services:
     env_file: .env
     networks:
       - coolify
+      - default
 
   frontend:
     build:
@@ -23,3 +25,4 @@ services:
       - backend
     networks:
       - coolify
+      - default
