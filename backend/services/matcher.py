@@ -14,6 +14,19 @@ DATENUM_RE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\
 NUM_RE = re.compile(r"\b\d+\b")
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+# Matches "Disponibilização: QUARTA-FEIRA, 18 DE MARCO DE 2026 00:00:00"
+# or "Disponibilizacao: SEGUNDA-FEIRA, 9 DE MARCO DE 2026 00:00:00"
+DISPONIBILIZACAO_RE = re.compile(
+    r"Disponibiliza[cç][aã]o:\s*\w+(?:-FEIRA)?,?\s*(\d{1,2})\s+DE\s+(\w+)\s+DE\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+_MONTH_MAP = {
+    "JANEIRO": 1, "FEVEREIRO": 2, "MARCO": 3, "MARÇO": 3,
+    "ABRIL": 4, "MAIO": 5, "JUNHO": 6, "JULH0": 7, "JULHO": 7,
+    "AGOSTO": 8, "SETEMBRO": 9, "OUTUBRO": 10, "NOVEMBRO": 11, "DEZEMBRO": 12,
+}
+
 RETIFICACAO_RE = re.compile(
     r"\b(RETIFICA[CÇ][AÃ]O|REPUBLICA[CÇ][AÃ]O|ERRATA|ONDE\s+SE\s+L[EÊ])\b",
     re.IGNORECASE,
@@ -103,6 +116,21 @@ def extract_meta(text: str) -> Dict[str, str]:
 
     meta["source"] = detect_source(t)
     meta["is_retificacao"] = is_retificacao(t)
+
+    # Extract disponibilização date — different dates = different publications
+    disp_match = DISPONIBILIZACAO_RE.search(t)
+    if disp_match:
+        day = int(disp_match.group(1))
+        month_name = unidecode(disp_match.group(2)).upper()
+        year = int(disp_match.group(3))
+        month = _MONTH_MAP.get(month_name, 0)
+        if month:
+            meta["data_disponibilizacao"] = f"{year}-{month:02d}-{day:02d}"
+        else:
+            meta["data_disponibilizacao"] = ""
+    else:
+        meta["data_disponibilizacao"] = ""
+
     return meta
 
 
@@ -283,6 +311,19 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
                         tokens_i = norm_i.split() if isinstance(norm_i, str) else []
                         tokens_j = norm_j.split() if isinstance(norm_j, str) else []
                         if len(tokens_i) < min_tokens or len(tokens_j) < min_tokens:
+                            continue
+
+                        # Block: same processo + different disponibilização date
+                        # = different publications, NOT duplicates
+                        meta_i = row_i["_meta"]
+                        meta_j = row_j["_meta"]
+                        disp_i = meta_i.get("data_disponibilizacao", "")
+                        disp_j = meta_j.get("data_disponibilizacao", "")
+                        if (
+                            disp_i and disp_j and disp_i != disp_j
+                            and meta_i.get("processo")
+                            and meta_i.get("processo") == meta_j.get("processo")
+                        ):
                             continue
 
                         folder = row_i.get("activity_folder")
