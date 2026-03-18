@@ -185,13 +185,29 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
     if not group_rows:
         return ""
 
-    closed_ids = {r["activity_id"] for r in group_rows if r.get("activity_status") != "Aberta"}
-    candidates = sorted(group_rows, key=lambda x: x["activity_id"] not in closed_ids)
+    # Never elect a "Cancelada" item as principal — it cannot be kept.
+    # Priority: Aberta first (actionable), then others (Fechada, Aguardando, etc.)
+    def _candidate_priority(row):
+        status = row.get("activity_status", "")
+        if status == "Cancelada":
+            return 2  # last resort
+        if status == "Aberta":
+            return 0  # preferred
+        return 1  # Fechada, Aguardando, etc.
 
-    best_id, max_avg_score = None, -1.0
+    candidates = sorted(group_rows, key=_candidate_priority)
+
+    best_id, max_avg_score, best_priority = None, -1.0, 99
 
     for candidate in candidates:
         candidate_id = candidate["activity_id"]
+        candidate_prio = _candidate_priority(candidate)
+
+        # If we already have a non-cancelled best and this candidate is
+        # cancelled, skip — never choose Cancelada over a valid candidate.
+        if candidate_prio == 2 and best_priority < 2:
+            break
+
         c_norm = candidate.get("_norm") or normalize_text(candidate.get("Texto", ""), [])
         c_meta = candidate.get("_meta") or extract_meta(candidate.get("Texto", ""))
 
@@ -208,11 +224,10 @@ def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_contai
 
         avg_score = sum(scores) / len(scores) if scores else 0.0
 
-        if best_id is None or avg_score > max_avg_score:
-            max_avg_score, best_id = avg_score, candidate_id
-
-        if candidate_id not in closed_ids and best_id in closed_ids:
-            break
+        if best_id is None or candidate_prio < best_priority or (
+            candidate_prio == best_priority and avg_score > max_avg_score
+        ):
+            max_avg_score, best_id, best_priority = avg_score, candidate_id, candidate_prio
 
     return str(best_id or group_rows[0]["activity_id"])
 
