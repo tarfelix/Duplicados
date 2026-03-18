@@ -1,0 +1,12 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 50
+maxMessageSize = 200
+
+# Timeouts mais generosos para evitar Gateway Timeout atrás de proxy (Coolify/Traefik)
+enableWebsocketCompression = false
+
+[browser]
+gatherUsageStats = false
