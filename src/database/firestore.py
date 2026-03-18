@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import logging
 import os
+import signal
 from typing import Dict, Optional
 try:
     import firebase_admin
@@ -65,9 +66,20 @@ def init_firestore():
         return None
     
     try:
+        # Timeout de 30s para inicialização do Firebase (evita travar a app)
+        def _timeout_handler(signum, frame):
+            raise TimeoutError("Firebase initialization timed out after 30s")
+
+        old_handler = None
+        try:
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(30)
+        except (ValueError, AttributeError):
+            pass  # signal.alarm não funciona em threads secundárias
+
         if not firebase_admin._apps:
             creds_dict = None
-            
+
             # 0) Streamlit Cloud: get_secret("firebase_credentials") devolve o dict da seção TOML
             raw_creds = get_secret("firebase_credentials")
             if isinstance(raw_creds, dict) and raw_creds.get("project_id") and raw_creds.get("private_key"):
@@ -125,10 +137,32 @@ def init_firestore():
             cred = credentials.Certificate(creds_dict)
             firebase_admin.initialize_app(cred)
         
-        return firestore.client()
+        client = firestore.client()
+
+        # Cancela o alarme de timeout
+        try:
+            signal.alarm(0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+        except (ValueError, AttributeError):
+            pass
+
+        return client
+    except TimeoutError as e:
+        _last_firestore_error = str(e)
+        logging.error(f"Timeout ao inicializar Firebase: {e}")
+        try:
+            signal.alarm(0)
+        except (ValueError, AttributeError):
+            pass
+        return None
     except Exception as e:
         _last_firestore_error = str(e)
         logging.error(f"Falha ao conectar no Firebase: {e}", exc_info=True)
+        try:
+            signal.alarm(0)
+        except (ValueError, AttributeError):
+            pass
         return None
 
 def log_action(db, user: str, action: str, details: Dict):

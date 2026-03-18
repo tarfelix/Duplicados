@@ -21,6 +21,9 @@ ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 
 EXPOSE 8501
 
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl --fail http://localhost:8501/_stcore/health
 
-CMD ["streamlit", "run", "app.py"]
+CMD ["streamlit", "run", "app.py", \
+     "--server.enableXsrfProtection=false", \
+     "--server.enableWebsocketCompression=false"]

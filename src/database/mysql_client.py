@@ -24,7 +24,9 @@ def get_mysql_engine() -> Optional[Engine]:
         engine = create_engine(
             f"mysql+mysqlconnector://{user}:{password}@{host}/{name}",
             pool_pre_ping=True,
-            pool_recycle=3600
+            pool_recycle=3600,
+            connect_args={"connect_timeout": 10},
+            pool_timeout=15,
         )
         with engine.connect():
             pass
@@ -86,6 +88,7 @@ def carregar_dados_mysql(_eng: Engine, dias_historico: int, pastas: List[str] = 
 
     try:
         with _eng.connect() as conn:
+            conn.execute(text("SET SESSION MAX_EXECUTION_TIME=60000"))  # 60s max query
             df = pd.read_sql(stmt, conn, params=params)
         
         if df.empty:
