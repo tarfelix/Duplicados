@@ -13,11 +13,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: create tables
-    init_db()
-    logging.info("Database tables initialized")
+    try:
+        init_db()
+        logging.info("Database tables initialized")
+    except Exception:
+        logging.exception("Failed to initialize database — app may not function correctly")
     yield
-    # Shutdown
     logging.info("Shutting down")
 
 

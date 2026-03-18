@@ -1,5 +1,6 @@
+import csv
+import io
 import logging
-from io import StringIO
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -56,7 +57,6 @@ def _build_groups(
     if hide_closed:
         groups = [g for g in groups if any(r.get("activity_status") == "Aberta" for r in g)]
 
-    # Sort: most open activities first, then by most recent date
     def sort_key(g):
         open_count = sum(1 for r in g if r.get("activity_status") == "Aberta")
         latest = max((pd.to_datetime(r.get("activity_date"), errors="coerce") for r in g), default=pd.Timestamp.min)
@@ -101,12 +101,12 @@ def get_groups(
             if not is_p:
                 score, score_details = combined_score(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
 
-            dt = pd.to_datetime(row.get("activity_date")) if row.get("activity_date") is not None else None
+            dt = pd.to_datetime(row.get("activity_date"), errors="coerce") if row.get("activity_date") is not None else None
             items.append(ActivityItem(
                 activity_id=rid,
                 activity_folder=row.get("activity_folder"),
                 user_profile_name=row.get("user_profile_name"),
-                activity_date=dt.isoformat() if dt and pd.notna(dt) else None,
+                activity_date=dt.isoformat() if dt is not None and pd.notna(dt) else None,
                 activity_status=row.get("activity_status"),
                 texto=row.get("Texto", ""),
                 score=score,
@@ -152,7 +152,7 @@ def cancel_activities(
             )
             success = response and (
                 response.get("ok") or response.get("success") or
-                response.get("code") in ("200", 200)
+                str(response.get("code", "")) == "200"
             )
             if success:
                 results["ok"] += 1
@@ -163,7 +163,6 @@ def cancel_activities(
 
             details.append({"activity_id": item.activity_id, "success": bool(success), "response": response})
 
-            # Audit log
             log = AuditLog(
                 username=user.username,
                 action=action,
@@ -171,7 +170,6 @@ def cancel_activities(
                     "activity_id": item.activity_id,
                     "principal_id": item.principal_id,
                     "dry_run": req.dry_run,
-                    "response": response,
                 },
             )
             db.add(log)
@@ -191,6 +189,33 @@ def cancel_activities(
     return CancelResult(ok=results["ok"], err=results["err"], details=details)
 
 
+def _csv_row_generator(groups_raw):
+    """Yield CSV rows as strings for true streaming."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    header = ["group_index", "group_size", "activity_id", "activity_folder", "activity_date", "activity_status", "user_profile_name", "Texto"]
+    writer.writerow(header)
+    yield output.getvalue()
+    output.seek(0)
+    output.truncate(0)
+
+    for i, g in enumerate(groups_raw):
+        for r in g:
+            writer.writerow([
+                i + 1,
+                len(g),
+                r.get("activity_id", ""),
+                r.get("activity_folder", ""),
+                r.get("activity_date", ""),
+                r.get("activity_status", ""),
+                r.get("user_profile_name", ""),
+                r.get("Texto", ""),
+            ])
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+
+
 @router.get("/export-csv")
 def export_csv(
     dias: int = Query(default=10, ge=1, le=365),
@@ -207,26 +232,8 @@ def export_csv(
 
     groups_raw, _, _ = _build_groups(dias, pastas_list, status_list, min_sim, min_containment, use_cnj, hide_closed)
 
-    rows = []
-    for i, g in enumerate(groups_raw):
-        for r in g:
-            rows.append({
-                "group_index": i + 1,
-                "group_size": len(g),
-                "activity_id": r.get("activity_id"),
-                "activity_folder": r.get("activity_folder"),
-                "activity_date": r.get("activity_date"),
-                "activity_status": r.get("activity_status"),
-                "user_profile_name": r.get("user_profile_name"),
-                "Texto": r.get("Texto", ""),
-            })
-
-    if not rows:
-        return StreamingResponse(iter([b""]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=duplicatas.csv"})
-
-    csv_data = pd.DataFrame(rows).to_csv(index=False)
     return StreamingResponse(
-        iter([csv_data.encode("utf-8")]),
+        _csv_row_generator(groups_raw),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=duplicatas.csv"},
     )

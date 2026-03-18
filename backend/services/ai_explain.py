@@ -1,4 +1,5 @@
 """AI-powered diff explanation — ported from src/services/ai_explain.py."""
+import logging
 from typing import Optional
 
 from backend.config import get_settings
@@ -75,4 +76,5 @@ Quais são as principais diferenças? (2 a 4 tópicos)"""
         content = (resp.choices[0].message.content or "").strip()
         return content if content else None
     except Exception:
+        logging.exception("AI explain_differences failed")
         return None

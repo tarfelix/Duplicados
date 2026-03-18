@@ -4,44 +4,56 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* Soares Picon brand palette */
+    --background: 210 20% 98%;
+    --foreground: 220 30% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
+    --card-foreground: 220 30% 12%;
+    --primary: 214 65% 42%;
     --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
+    --secondary: 210 30% 94%;
+    --secondary-foreground: 220 30% 12%;
+    --muted: 210 25% 94%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 207 60% 92%;
+    --accent-foreground: 214 65% 32%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
+    --border: 214 25% 88%;
+    --input: 214 25% 88%;
+    --ring: 214 65% 42%;
     --radius: 0.5rem;
+
+    /* Brand specific */
+    --brand-dark: 214 60% 26%;
+    --brand-medium: 214 55% 44%;
+    --brand-light: 207 60% 70%;
+    --brand-accent: 207 70% 85%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --background: 220 25% 7%;
+    --foreground: 210 30% 94%;
+    --card: 220 25% 10%;
+    --card-foreground: 210 30% 94%;
+    --primary: 207 65% 58%;
+    --primary-foreground: 220 25% 7%;
+    --secondary: 220 20% 16%;
+    --secondary-foreground: 210 30% 94%;
+    --muted: 220 20% 16%;
+    --muted-foreground: 215 15% 60%;
+    --accent: 220 20% 16%;
+    --accent-foreground: 207 65% 70%;
+    --destructive: 0 60% 40%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+    --border: 220 20% 18%;
+    --input: 220 20% 18%;
+    --ring: 207 65% 48%;
+
+    --brand-dark: 207 65% 70%;
+    --brand-medium: 207 55% 58%;
+    --brand-light: 207 50% 45%;
+    --brand-accent: 220 25% 18%;
   }
 }
 
@@ -51,12 +63,60 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
 }
 
+/* Diff highlighting */
 .diff-del {
-  background-color: #ffcdd2;
+  background-color: #fecaca;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 .diff-ins {
-  background-color: #c8e6c9;
+  background-color: #bbf7d0;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.dark .diff-del {
+  background-color: rgba(239, 68, 68, 0.25);
+}
+.dark .diff-ins {
+  background-color: rgba(34, 197, 94, 0.25);
+}
+
+/* Custom range slider */
+input[type="range"] {
+  @apply appearance-none h-2 rounded-full;
+  background: hsl(var(--border));
+}
+input[type="range"]::-webkit-slider-thumb {
+  @apply appearance-none w-4 h-4 rounded-full cursor-pointer;
+  background: hsl(var(--primary));
+}
+
+/* Custom checkbox */
+input[type="checkbox"] {
+  @apply accent-[hsl(var(--primary))];
+}
+
+/* Smooth transitions */
+.transition-sidebar {
+  transition: transform 0.2s ease-in-out;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
 }

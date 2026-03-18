@@ -1,6 +1,5 @@
 import logging
 from datetime import date, timedelta
-from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import pandas as pd
@@ -10,10 +9,13 @@ from sqlalchemy.engine import Engine
 from backend.config import get_settings
 
 _mysql_engine: Optional[Engine] = None
+_engine_failed: bool = False
 
 
 def get_mysql_engine() -> Optional[Engine]:
-    global _mysql_engine
+    """Get or create MySQL engine with retry on previous failure."""
+    global _mysql_engine, _engine_failed
+
     if _mysql_engine is not None:
         return _mysql_engine
 
@@ -27,15 +29,24 @@ def get_mysql_engine() -> Optional[Engine]:
             settings.mysql_url,
             pool_pre_ping=True,
             pool_recycle=3600,
-            connect_args={"connection_timeout": 10, "connect_timeout": 10},
+            connect_args={"connect_timeout": 10},
         )
         with engine.connect():
             pass
         _mysql_engine = engine
+        _engine_failed = False
         return _mysql_engine
     except Exception as e:
         logging.exception(f"MySQL connection error: {e}")
+        _engine_failed = True
         return None
+
+
+def reset_mysql_engine():
+    """Reset engine so next call retries connection."""
+    global _mysql_engine, _engine_failed
+    _mysql_engine = None
+    _engine_failed = False
 
 
 def carregar_opcoes_mysql() -> Tuple[List[str], List[str]]:
@@ -59,6 +70,7 @@ def carregar_opcoes_mysql() -> Tuple[List[str], List[str]]:
         return sorted(pastas), sorted(status)
     except exc.SQLAlchemyError as e:
         logging.exception(f"Error loading filter options: {e}")
+        reset_mysql_engine()
         return [], []
 
 
@@ -71,6 +83,9 @@ def carregar_dados_mysql(
     if not engine:
         return pd.DataFrame()
 
+    if dias_historico < 1:
+        dias_historico = 1
+
     limite = date.today() - timedelta(days=dias_historico)
 
     base_query = """
@@ -80,7 +95,7 @@ def carregar_dados_mysql(
           AND (activity_status='Aberta' OR DATE(activity_date) >= :limite)
     """
 
-    params = {"limite": limite}
+    params: dict = {"limite": limite}
 
     if pastas:
         base_query += " AND activity_folder IN :pastas"
@@ -113,4 +128,5 @@ def carregar_dados_mysql(
         return df
     except exc.SQLAlchemyError as e:
         logging.exception(f"Error loading activities: {e}")
+        reset_mysql_engine()
         return pd.DataFrame()

@@ -15,7 +15,8 @@ export default function SimilarityBadge({ score, details, threshold }: Props) {
     : ''
 
   return (
-    <span className={`inline-block mt-1 text-xs font-semibold px-2 py-0.5 rounded ${color}`} title={tooltip}>
+    <span className={`inline-flex items-center gap-1 mt-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full ${color}`} title={tooltip}>
+      <span className="inline-block w-1.5 h-1.5 rounded-full bg-current opacity-70" />
       {label} — {score.toFixed(0)}%
     </span>
   )

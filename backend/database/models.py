@@ -27,4 +27,4 @@ class AuditLog(Base):
     ts = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     username = Column(String(100), nullable=False)
     action = Column(String(100), nullable=False)
-    details = Column(JSONB, default={})
+    details = Column(JSONB, default=dict)

@@ -53,8 +53,8 @@ export default function CancelDialog({ open, onClose, onConfirm, items, isPendin
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {items.map((item, i) => (
-                  <tr key={i}>
+                {items.map((item) => (
+                  <tr key={item.activity_id}>
                     <td className="px-3 py-1.5 font-mono">{item.activity_id}</td>
                     <td className="px-3 py-1.5 font-mono">{item.principal_id}</td>
                   </tr>

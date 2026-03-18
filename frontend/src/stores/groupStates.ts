@@ -7,11 +7,16 @@ interface GroupState {
 
 interface GroupStatesStore {
   states: Record<string, GroupState>
+  ignoredGroups: Set<string>
   getState: (groupId: string, defaultPrincipalId: string) => GroupState
   setPrincipal: (groupId: string, principalId: string) => void
   toggleCancel: (groupId: string, activityId: string) => void
   markAllForCancel: (groupId: string, allIds: string[], principalId: string) => void
   clearGroup: (groupId: string) => void
+  ignoreGroup: (groupId: string) => void
+  unignoreGroup: (groupId: string) => void
+  isIgnored: (groupId: string) => boolean
+  getIgnoredCount: () => number
   clearAll: () => void
   getMarkedCount: () => number
   getAllCancelItems: () => { activity_id: string; principal_id: string }[]
@@ -19,6 +24,7 @@ interface GroupStatesStore {
 
 export const useGroupStates = create<GroupStatesStore>((set, get) => ({
   states: {},
+  ignoredGroups: new Set(),
 
   getState: (groupId, defaultPrincipalId) => {
     const existing = get().states[groupId]
@@ -67,7 +73,28 @@ export const useGroupStates = create<GroupStatesStore>((set, get) => ({
     })
   },
 
-  clearAll: () => set({ states: {} }),
+  ignoreGroup: (groupId) => {
+    set((s) => {
+      const { [groupId]: _, ...rest } = s.states
+      const ignored = new Set(s.ignoredGroups)
+      ignored.add(groupId)
+      return { states: rest, ignoredGroups: ignored }
+    })
+  },
+
+  unignoreGroup: (groupId) => {
+    set((s) => {
+      const ignored = new Set(s.ignoredGroups)
+      ignored.delete(groupId)
+      return { ignoredGroups: ignored }
+    })
+  },
+
+  isIgnored: (groupId) => get().ignoredGroups.has(groupId),
+
+  getIgnoredCount: () => get().ignoredGroups.size,
+
+  clearAll: () => set({ states: {}, ignoredGroups: new Set() }),
 
   getMarkedCount: () => {
     const states = get().states
