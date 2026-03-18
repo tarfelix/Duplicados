@@ -57,6 +57,15 @@ def _build_groups(
     if hide_closed:
         groups = [g for g in groups if any(r.get("activity_status") == "Aberta" for r in g)]
 
+    # Hide already-resolved groups: if there are cancelled items and only
+    # 1 non-cancelled item remains, the duplicate was already handled.
+    def _is_resolved(g):
+        cancelled = sum(1 for r in g if r.get("activity_status") == "Cancelada")
+        non_cancelled = sum(1 for r in g if r.get("activity_status") != "Cancelada")
+        return cancelled >= 1 and non_cancelled <= 1
+
+    groups = [g for g in groups if not _is_resolved(g)]
+
     def sort_key(g):
         open_count = sum(1 for r in g if r.get("activity_status") == "Aberta")
         latest = max((pd.to_datetime(r.get("activity_date"), errors="coerce") for r in g), default=pd.Timestamp.min)
