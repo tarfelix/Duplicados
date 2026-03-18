@@ -12,12 +12,71 @@ CNJ_RE = re.compile(r"(?:\b|^)(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})(?:\b|$)")
 URL_RE = re.compile(r"https?://\S+")
 DATENUM_RE = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
 NUM_RE = re.compile(r"\b\d+\b")
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+RETIFICACAO_RE = re.compile(
+    r"\b(RETIFICA[CÇ][AÃ]O|REPUBLICA[CÇ][AÃ]O|ERRATA|ONDE\s+SE\s+L[EÊ])\b",
+    re.IGNORECASE,
+)
+
+# Headers specific to DJEN ingestion pipelines (CAD1/DJENTJSP/etc.)
+DJEN_HEADER_PATTERNS = [
+    re.compile(r"^CAD\d+\s*-\s*", re.IGNORECASE),
+    re.compile(r"^DJEN\w*\s*-\s*", re.IGNORECASE),
+    re.compile(r"TIPO\s+DE\s+DOCUMENTO:\s*[^-\n\r]+[-\s]*", re.IGNORECASE),
+    re.compile(r"DATA\s+DE\s+ENVIO:\s*[\d/]+\s*[-\s]*", re.IGNORECASE),
+]
 
 STOPWORDS_BASE = set("""
     de da do das dos e em a o os as na no para por com que ao aos às à um uma umas uns
     tipo titulo inteiro teor publicado publicacao disponibilizacao orgao vara tribunal
     processo recurso intimacao notificacao justica nacional diario djen poder judiciario trabalho
+    cad1 djentjsp djenstj djentjrj djentrt envio documento comunicacao
 """.split())
+
+
+def detect_source(text: str) -> str:
+    """Detect the ingestion pipeline source from the text content."""
+    t = (text or "").upper()
+    if "AASP" in t:
+        return "AASP"
+    if "ADVISE" in t:
+        return "ADVISE"
+    # CAD1/CAD2/etc. is a DJEN ingestion pipeline
+    stripped = t.lstrip()
+    if stripped.startswith("CAD") and len(stripped) > 3 and stripped[3:4].isdigit():
+        return "DJEN_CAD"
+    # DJENTJSP, DJENSTJ, DJENTJRJ, DJENTRT — alternate DJEN pipelines
+    if any(tag in t for tag in ("DJENTJSP", "DJENSTJ", "DJENTJRJ", "DJENTRT")):
+        return "DJEN_DJ"
+    if "DJEN" in t:
+        return "DJEN"
+    if "DJE" in t or "DIARIO ELETRONICO" in t:
+        return "DJE"
+    return "OTHER"
+
+
+def is_retificacao(text: str) -> bool:
+    """Check if the text is a retificacao/republicacao (should not be auto-cancelled)."""
+    return bool(RETIFICACAO_RE.search(text or ""))
+
+
+def _are_same_djen_pipelines(source_a: str, source_b: str) -> bool:
+    """Check if two sources are different DJEN pipelines (CAD vs DJ)."""
+    djen_sources = {"DJEN_CAD", "DJEN_DJ", "DJEN"}
+    return (
+        source_a in djen_sources
+        and source_b in djen_sources
+        and source_a != source_b
+    )
+
+
+def strip_djen_headers(text: str) -> str:
+    """Remove DJEN pipeline-specific headers that cause score differences between CAD1/DJENTJSP."""
+    result = text
+    for pattern in DJEN_HEADER_PATTERNS:
+        result = pattern.sub(" ", result)
+    return result
 
 
 def extract_meta(text: str) -> Dict[str, str]:
@@ -41,13 +100,20 @@ def extract_meta(text: str) -> Dict[str, str]:
         match = re.search(pattern, t, re.IGNORECASE)
         if match:
             meta[key] = match.group(1).strip() if key != "vara" else match.group(0).strip()
+
+    meta["source"] = detect_source(t)
+    meta["is_retificacao"] = is_retificacao(t)
     return meta
 
 
 def normalize_text(text: str, stopwords_extra: List[str]) -> str:
     if not isinstance(text, str):
         return ""
-    t = URL_RE.sub(" url ", text)
+    # Strip HTML tags first
+    t = HTML_TAG_RE.sub(" ", text)
+    # Strip DJEN pipeline-specific headers
+    t = strip_djen_headers(t)
+    t = URL_RE.sub(" url ", t)
     t = CNJ_RE.sub(" numproc ", t)
     t = DATENUM_RE.sub(" data ", t)
     t = NUM_RE.sub(" # ", t)
@@ -83,6 +149,13 @@ def combined_score(
         ):
             lp = max(lp, 0.85)
 
+    # Source-aware: relax length penalty for cross-pipeline DJEN pairs
+    source_a = meta_a.get("source", "")
+    source_b = meta_b.get("source", "")
+    cross_djen = _are_same_djen_pipelines(source_a, source_b)
+    if cross_djen:
+        lp = max(lp, 0.92)
+
     base_score = 0.6 * set_ratio + 0.2 * sort_ratio + 0.2 * contain
     base_after_lp = base_score * lp
     bonus = 0
@@ -98,7 +171,14 @@ def combined_score(
         bonus = min(bonus, 5)
     final_score = max(0.0, min(100.0, base_after_lp + bonus))
 
-    return final_score, {"set": set_ratio, "sort": sort_ratio, "contain": contain, "len_pen": lp, "bonus": bonus}
+    return final_score, {
+        "set": set_ratio,
+        "sort": sort_ratio,
+        "contain": contain,
+        "len_pen": lp,
+        "bonus": bonus,
+        "cross_djen": cross_djen,
+    }
 
 
 def get_best_principal_id(group_rows: List[Dict], min_sim_pct: float, min_containment_pct: float) -> str:
@@ -195,13 +275,36 @@ def create_groups(df: pd.DataFrame, params: Dict) -> List[List[Dict]]:
                         min_sim = _normalize_sim_value(raw_min_sim) * 100
 
                         score, details = combined_score(row_i["_norm"], row_j["_norm"], row_i["_meta"], row_j["_meta"])
-                        if score >= min_sim and details["contain"] >= params["min_containment"]:
+
+                        # Relax threshold for cross-pipeline DJEN pairs
+                        effective_min_sim = min_sim
+                        if details.get("cross_djen"):
+                            effective_min_sim = max(min_sim - 5, 80)
+
+                        if score >= effective_min_sim and details["contain"] >= params["min_containment"]:
                             local_visited[j] = True
                             cluster.append(idxs[j])
                             queue.append(j)
 
             if len(cluster) > 1:
                 cluster_rows = work_df.loc[cluster].sort_values("activity_date", ascending=False)
-                groups.append(cluster_rows.to_dict("records"))
+                group_records = cluster_rows.to_dict("records")
+
+                # Enrich group with source and retificacao metadata
+                sources = set()
+                has_retif = False
+                for rec in group_records:
+                    meta = rec.get("_meta", {})
+                    sources.add(meta.get("source", "OTHER"))
+                    if meta.get("is_retificacao"):
+                        has_retif = True
+                for rec in group_records:
+                    rec["_group_sources"] = sorted(sources)
+                    rec["_group_is_retificacao"] = has_retif
+                    rec["_group_cross_djen"] = _are_same_djen_pipelines(
+                        *list(sources)[:2]
+                    ) if len(sources) == 2 else False
+
+                groups.append(group_records)
 
     return groups

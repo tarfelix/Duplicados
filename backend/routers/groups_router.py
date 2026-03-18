@@ -115,12 +115,18 @@ def get_groups(
             ))
 
         open_count = sum(1 for r in g if r.get("activity_status") == "Aberta")
+        group_sources = g[0].get("_group_sources", [])
+        group_is_retif = g[0].get("_group_is_retificacao", False)
+        group_cross_djen = g[0].get("_group_cross_djen", False)
         groups_response.append(GroupResponse(
             group_id=group_id,
             items=items,
             folder=g[0].get("activity_folder"),
             open_count=open_count,
             best_principal_id=best_pid,
+            sources=group_sources if group_sources else None,
+            is_retificacao=group_is_retif,
+            is_cross_djen=group_cross_djen,
         ))
 
     return GroupsListResponse(

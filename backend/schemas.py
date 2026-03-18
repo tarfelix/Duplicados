@@ -85,6 +85,9 @@ class GroupResponse(BaseModel):
     folder: Optional[str] = None
     open_count: int = 0
     best_principal_id: str = ""
+    sources: Optional[List[str]] = None
+    is_retificacao: bool = False
+    is_cross_djen: bool = False
 
 
 class GroupsListResponse(BaseModel):
