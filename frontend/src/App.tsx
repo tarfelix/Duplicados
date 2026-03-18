@@ -25,8 +25,8 @@ function AuthRedirect() {
   const isAuth = useAuthStore((s) => s.isAuthenticated())
   const { data: hasUsers, isLoading } = useHasUsers()
 
-  if (isLoading) return <div className="flex items-center justify-center h-screen">Carregando...</div>
   if (isAuth) return <Navigate to="/" replace />
+  if (isLoading) return <div className="flex items-center justify-center h-screen">Carregando...</div>
   if (hasUsers === false) return <Navigate to="/setup" replace />
   return <LoginPage />
 }

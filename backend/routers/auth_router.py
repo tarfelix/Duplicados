@@ -65,7 +65,11 @@ def setup_first_admin(req: CreateUserRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or request.headers.get("x-real-ip", "")
+        or (request.client.host if request.client else "unknown")
+    )
     _check_rate_limit(client_ip)
 
     username = req.username.strip().lower()
