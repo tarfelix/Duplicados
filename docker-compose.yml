@@ -1,3 +1,7 @@
+networks:
+  coolify:
+    external: true
+
 services:
   backend:
     build:
@@ -6,6 +10,8 @@ services:
     expose:
       - "8000"
     env_file: .env
+    networks:
+      - coolify
 
   frontend:
     build:
@@ -15,3 +21,5 @@ services:
       - "80"
     depends_on:
       - backend
+    networks:
+      - coolify
