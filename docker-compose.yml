@@ -1,18 +1,4 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: duplicados
-      POSTGRES_USER: duplicados
-      POSTGRES_PASSWORD: duplicados_dev
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U duplicados -d duplicados"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   backend:
     build:
       context: .
@@ -20,15 +6,6 @@ services:
     expose:
       - "8000"
     env_file: .env
-    environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=duplicados
-      - POSTGRES_USER=duplicados
-      - POSTGRES_PASSWORD=duplicados_dev
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   frontend:
     build:
@@ -38,6 +15,3 @@ services:
       - "80"
     depends_on:
       - backend
-
-volumes:
-  pgdata:
