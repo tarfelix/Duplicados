@@ -247,8 +247,12 @@ def export_csv(
 
 @router.post("/diff", response_model=DiffResponse)
 def compute_diff(req: DiffRequest, user: User = Depends(get_current_user)):
-    html_a, html_b = render_diff(req.text_a, req.text_b, req.limit)
-    return DiffResponse(html_a=html_a, html_b=html_b)
+    try:
+        html_a, html_b = render_diff(req.text_a, req.text_b, req.limit)
+        return DiffResponse(html_a=html_a, html_b=html_b)
+    except Exception:
+        logging.exception("Error in /diff endpoint")
+        raise HTTPException(status_code=500, detail="Erro interno ao gerar diff.")
 
 
 @router.post("/explain-diff", response_model=ExplainDiffResponse)

@@ -62,7 +62,14 @@ export default function DiffDialog({ open, onClose, principalText, principalId, 
               <span className="text-sm text-muted-foreground">Calculando diferenças...</span>
             </div>
           ) : diff.isError ? (
-            <div className="text-center text-sm text-destructive py-8">Erro ao gerar diff.</div>
+            <div className="text-center text-sm text-destructive py-8">
+              Erro ao gerar diff.
+              <div className="text-xs text-muted-foreground mt-2">
+                {(diff.error as any)?.response?.status && `Status: ${(diff.error as any).response.status}`}
+                {' '}
+                {(diff.error as any)?.response?.data?.detail || (diff.error as any)?.message || ''}
+              </div>
+            </div>
           ) : diff.data ? (
             <div className="grid grid-cols-2 gap-4">
               <div>
