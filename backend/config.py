@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     azure_openai_deployment: str = "gpt-4o"
     openai_model: str = "gpt-4o"
 
+    # Seed admin (optional — creates first admin on startup if no users exist)
+    admin_username: str = ""
+    admin_password: str = ""
+
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
 
