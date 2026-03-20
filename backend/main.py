@@ -45,4 +45,12 @@ app.include_router(groups_router.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    try:
+        from backend.database.postgres import get_engine
+        from sqlalchemy import text
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"status": "ok", "db": "connected"}
+    except Exception as e:
+        logging.error(f"Health check DB error: {e}")
+        return {"status": "degraded", "db": "disconnected", "error": str(e)}

@@ -46,6 +46,8 @@ def get_engine():
             pool_recycle=3600,
             pool_size=10,
             max_overflow=20,
+            connect_args={"connect_timeout": 10},
+            pool_timeout=15,
         )
     return _engine
 
