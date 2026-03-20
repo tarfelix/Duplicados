@@ -1,5 +1,27 @@
 import { create } from 'zustand'
 
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    if (!payload.exp) return false
+    // Add 30s buffer to avoid edge-case failures
+    return Date.now() >= (payload.exp * 1000) - 30_000
+  } catch {
+    return true
+  }
+}
+
+function getValidToken(): string | null {
+  const token = localStorage.getItem('access_token')
+  if (token && isTokenExpired(token)) {
+    localStorage.removeItem('access_token')
+    localStorage.removeItem('username')
+    localStorage.removeItem('role')
+    return null
+  }
+  return token
+}
+
 interface AuthState {
   token: string | null
   username: string | null
@@ -11,9 +33,9 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
-  token: localStorage.getItem('access_token'),
-  username: localStorage.getItem('username'),
-  role: localStorage.getItem('role') as 'admin' | 'user' | null,
+  token: getValidToken(),
+  username: getValidToken() ? localStorage.getItem('username') : null,
+  role: getValidToken() ? localStorage.getItem('role') as 'admin' | 'user' | null : null,
 
   login: (token, username, role) => {
     localStorage.setItem('access_token', token)
@@ -29,6 +51,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ token: null, username: null, role: null })
   },
 
-  isAuthenticated: () => !!get().token,
+  isAuthenticated: () => {
+    const token = get().token
+    if (!token) return false
+    if (isTokenExpired(token)) {
+      // Token expired — clean up
+      get().logout()
+      return false
+    }
+    return true
+  },
   isAdmin: () => get().role === 'admin',
 }))
