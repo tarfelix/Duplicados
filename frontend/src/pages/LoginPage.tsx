@@ -21,7 +21,13 @@ export default function LoginPage() {
       {
         onSuccess: () => navigate('/'),
         onError: (err: any) => {
-          toast.error(err.response?.data?.detail || 'Usuário ou senha inválidos.')
+          const detail = err.response?.data?.detail
+          const msg = typeof detail === 'string'
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((e: any) => e.msg).join(', ')
+              : 'Usuário ou senha inválidos.'
+          toast.error(msg)
         },
       }
     )
