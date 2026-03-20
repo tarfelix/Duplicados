@@ -23,8 +23,16 @@ except Exception:
 st.set_page_config(layout="wide", page_title=APP_TITLE)
 apply_styles()
 
+import logging as _logging
+_logging.basicConfig(level=_logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+_logging.info("Inicializando Firebase...")
 db_firestore = init_firestore()
+_logging.info(f"Firebase: {'OK' if db_firestore else 'FALHOU'}")
+
+_logging.info("Inicializando MySQL...")
 mysql_engine = get_mysql_engine()
+_logging.info(f"MySQL: {'OK' if mysql_engine else 'FALHOU'}")
 
 # Sem Firebase não há gestão de usuários
 if db_firestore is None:
@@ -40,7 +48,9 @@ if mysql_engine is None:
     st.stop()
 
 # --- Primeiro acesso: criar administrador inicial ---
-if not has_any_user(db_firestore):
+with st.spinner("Verificando usuários..."):
+    _has_users = has_any_user(db_firestore)
+if not _has_users:
     st.title(APP_TITLE)
     st.subheader("Configuração inicial")
     st.info("Não há usuários ainda. Crie o primeiro usuário (administrador).")
@@ -72,7 +82,8 @@ if SK.USERNAME not in st.session_state:
         pwd = st.text_input("Senha", type="password")
         if st.button("Entrar"):
             if user and pwd:
-                auth = authenticate(db_firestore, user, pwd)
+                with st.spinner("Autenticando..."):
+                    auth = authenticate(db_firestore, user, pwd)
                 if auth:
                     st.session_state[SK.USERNAME] = auth["username"]
                     st.session_state[SK.USER_ROLE] = auth.get("role", "user")

@@ -5,6 +5,7 @@ Senhas são armazenadas com hash seguro usando passlib.
 """
 import logging
 import re
+import concurrent.futures
 from typing import Optional, List, Dict, Any
 
 try:
@@ -14,6 +15,14 @@ except ImportError:
 
 COLLECTION_USERS = "verificador_users"
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
+FIRESTORE_TIMEOUT = 15  # segundos
+
+
+def _run_with_timeout(fn, timeout=FIRESTORE_TIMEOUT):
+    """Executa fn() com timeout. Retorna o resultado ou levanta TimeoutError."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        return future.result(timeout=timeout)
 
 PWD_CONTEXT = (
     CryptContext(
@@ -45,9 +54,14 @@ def get_user(db, username: str) -> Optional[Dict[str, Any]]:
     if not db or not username:
         return None
     try:
-        doc = db.collection(COLLECTION_USERS).document(username.strip().lower()).get()
+        doc = _run_with_timeout(
+            lambda: db.collection(COLLECTION_USERS).document(username.strip().lower()).get()
+        )
         if doc.exists:
             return doc.to_dict()
+        return None
+    except concurrent.futures.TimeoutError:
+        logging.error(f"Timeout ({FIRESTORE_TIMEOUT}s) ao buscar usuário {username} no Firestore")
         return None
     except Exception as e:
         logging.error(f"Erro ao buscar usuário {username}: {e}")
@@ -58,11 +72,16 @@ def list_users(db) -> List[Dict[str, Any]]:
     if not db:
         return []
     try:
-        docs = db.collection(COLLECTION_USERS).stream()
+        docs = _run_with_timeout(
+            lambda: list(db.collection(COLLECTION_USERS).stream())
+        )
         return [
             {"username": doc.id, "role": doc.to_dict().get("role", "user"), "created_at": doc.to_dict().get("created_at")}
             for doc in docs
         ]
+    except concurrent.futures.TimeoutError:
+        logging.error(f"Timeout ({FIRESTORE_TIMEOUT}s) ao listar usuários no Firestore")
+        return []
     except Exception as e:
         logging.error(f"Erro ao listar usuários: {e}")
         return []
@@ -190,7 +209,12 @@ def has_any_user(db) -> bool:
     if not db:
         return False
     try:
-        ref = db.collection(COLLECTION_USERS).limit(1)
-        return len(list(ref.stream())) > 0
+        result = _run_with_timeout(
+            lambda: len(list(db.collection(COLLECTION_USERS).limit(1).stream())) > 0
+        )
+        return result
+    except concurrent.futures.TimeoutError:
+        logging.error(f"Timeout ({FIRESTORE_TIMEOUT}s) ao verificar usuários no Firestore")
+        return False
     except Exception:
         return False
