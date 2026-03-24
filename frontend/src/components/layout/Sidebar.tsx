@@ -75,7 +75,7 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
               onChange={(e) => filters.setFilter('pastas', Array.from(e.target.selectedOptions, (o) => o.value))}
               className="mt-1.5 w-full rounded-lg border bg-background px-2 py-1.5 text-sm h-24 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
             >
-              {filterOptions?.pastas.map((p) => (
+              {(filterOptions?.pastas ?? []).map((p) => (
                 <option key={p} value={p}>{p}</option>
               ))}
             </select>
@@ -92,7 +92,7 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
               onChange={(e) => filters.setFilter('status', Array.from(e.target.selectedOptions, (o) => o.value))}
               className="mt-1.5 w-full rounded-lg border bg-background px-2 py-1.5 text-sm h-24 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
             >
-              {filterOptions?.status.map((s) => (
+              {(filterOptions?.status ?? []).map((s) => (
                 <option key={s} value={s}>{s}</option>
               ))}
             </select>
