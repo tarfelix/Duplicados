@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import math
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -27,6 +28,15 @@ from backend.schemas import (
 )
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
+
+
+def _nan_to_none(v):
+    """Convert pandas NaN (float) to None so Pydantic Optional[str] fields accept it."""
+    if v is None:
+        return None
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    return v
 
 
 def _build_groups(
@@ -93,60 +103,60 @@ def get_groups(
 
     try:
         groups_raw, total_abertas, df = _build_groups(dias, pastas_list, status_list, min_sim, min_containment, use_cnj, hide_closed)
-    except Exception:
-        logging.exception("Erro em _build_groups")
-        raise
 
-    groups_response = []
-    for g in groups_raw:
-        group_id = str(g[0]["activity_id"])
-        best_pid = get_best_principal_id(g, min_sim, min_containment)
-        principal = next((r for r in g if r["activity_id"] == best_pid), g[0])
-        p_norm = principal.get("_norm", "")
-        p_meta = principal.get("_meta", {})
+        groups_response = []
+        for g in groups_raw:
+            group_id = str(g[0]["activity_id"])
+            best_pid = get_best_principal_id(g, min_sim, min_containment)
+            principal = next((r for r in g if r["activity_id"] == best_pid), g[0])
+            p_norm = principal.get("_norm", "")
+            p_meta = principal.get("_meta", {})
 
-        items = []
-        for row in g:
-            rid = row["activity_id"]
-            is_p = rid == best_pid
-            score = None
-            score_details = None
-            if not is_p:
-                score, score_details = combined_score(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
+            items = []
+            for row in g:
+                rid = row["activity_id"]
+                is_p = rid == best_pid
+                score = None
+                score_details = None
+                if not is_p:
+                    score, score_details = combined_score(p_norm, row.get("_norm", ""), p_meta, row.get("_meta", {}))
 
-            dt = pd.to_datetime(row.get("activity_date"), errors="coerce") if row.get("activity_date") is not None else None
-            items.append(ActivityItem(
-                activity_id=rid,
-                activity_folder=row.get("activity_folder"),
-                user_profile_name=row.get("user_profile_name"),
-                activity_date=dt.isoformat() if dt is not None and pd.notna(dt) else None,
-                activity_status=row.get("activity_status"),
-                texto=row.get("Texto", ""),
-                score=score,
-                score_details=score_details,
-                is_principal=is_p,
+                dt = pd.to_datetime(row.get("activity_date"), errors="coerce") if row.get("activity_date") is not None else None
+                items.append(ActivityItem(
+                    activity_id=rid,
+                    activity_folder=_nan_to_none(row.get("activity_folder")),
+                    user_profile_name=_nan_to_none(row.get("user_profile_name")),
+                    activity_date=dt.isoformat() if dt is not None and pd.notna(dt) else None,
+                    activity_status=_nan_to_none(row.get("activity_status")),
+                    texto=row.get("Texto", ""),
+                    score=score,
+                    score_details=score_details,
+                    is_principal=is_p,
+                ))
+
+            open_count = sum(1 for r in g if r.get("activity_status") == "Aberta")
+            group_sources = g[0].get("_group_sources", [])
+            group_is_retif = g[0].get("_group_is_retificacao", False)
+            group_cross_djen = g[0].get("_group_cross_djen", False)
+            groups_response.append(GroupResponse(
+                group_id=group_id,
+                items=items,
+                folder=_nan_to_none(g[0].get("activity_folder")),
+                open_count=open_count,
+                best_principal_id=best_pid,
+                sources=group_sources if group_sources else None,
+                is_retificacao=group_is_retif,
+                is_cross_djen=group_cross_djen,
             ))
 
-        open_count = sum(1 for r in g if r.get("activity_status") == "Aberta")
-        group_sources = g[0].get("_group_sources", [])
-        group_is_retif = g[0].get("_group_is_retificacao", False)
-        group_cross_djen = g[0].get("_group_cross_djen", False)
-        groups_response.append(GroupResponse(
-            group_id=group_id,
-            items=items,
-            folder=g[0].get("activity_folder"),
-            open_count=open_count,
-            best_principal_id=best_pid,
-            sources=group_sources if group_sources else None,
-            is_retificacao=group_is_retif,
-            is_cross_djen=group_cross_djen,
-        ))
-
-    return GroupsListResponse(
-        groups=groups_response,
-        total_groups=len(groups_response),
-        total_abertas=total_abertas,
-    )
+        return GroupsListResponse(
+            groups=groups_response,
+            total_groups=len(groups_response),
+            total_abertas=total_abertas,
+        )
+    except Exception:
+        logging.exception("Erro em get_groups")
+        raise
 
 
 @router.post("/cancel", response_model=CancelResult)
