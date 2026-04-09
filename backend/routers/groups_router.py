@@ -91,7 +91,11 @@ def get_groups(
     pastas_list = [p.strip() for p in pastas.split(",") if p.strip()] if pastas else None
     status_list = [s.strip() for s in status.split(",") if s.strip()] if status else None
 
-    groups_raw, total_abertas, df = _build_groups(dias, pastas_list, status_list, min_sim, min_containment, use_cnj, hide_closed)
+    try:
+        groups_raw, total_abertas, df = _build_groups(dias, pastas_list, status_list, min_sim, min_containment, use_cnj, hide_closed)
+    except Exception:
+        logging.exception("Erro em _build_groups")
+        raise
 
     groups_response = []
     for g in groups_raw:
