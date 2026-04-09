@@ -121,6 +121,11 @@ def carregar_dados_mysql(
         df["activity_date"] = pd.to_datetime(df["activity_date"], errors="coerce")
         df["Texto"] = df["Texto"].fillna("").astype(str)
 
+        # Convert NaN → None in string columns so Pydantic Optional[str] fields accept them
+        for col in ["activity_folder", "user_profile_name", "activity_status"]:
+            if col in df.columns:
+                df[col] = df[col].where(df[col].notna(), other=None)
+
         df["status_ord"] = df["activity_status"].map({"Aberta": 0}).fillna(1)
         df = df.sort_values(["activity_id", "status_ord"]).drop_duplicates("activity_id", keep="first").drop(columns="status_ord")
         df = df.sort_values(["activity_folder", "activity_date"], ascending=[True, False])
