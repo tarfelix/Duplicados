@@ -7,6 +7,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import logging
 
 from src.config import get_secret
+from src.database import zion_mirror
 
 @st.cache_resource
 def get_mysql_engine() -> Optional[Engine]:
@@ -39,9 +40,19 @@ def get_mysql_engine() -> Optional[Engine]:
 @st.cache_data(ttl=3600, hash_funcs={Engine: lambda _: None})
 def carregar_opcoes_mysql(_eng: Engine) -> Tuple[List[str], List[str]]:
     """Carrega apenas os filtros distintos de pastas e status."""
+    # Mirror first
+    if zion_mirror.is_enabled():
+        try:
+            r = zion_mirror.carregar_opcoes_mirror()
+            if r is not None:
+                logging.info(f"[mirror] {len(r[0])} pastas, {len(r[1])} status")
+                return r
+        except Exception as e:
+            logging.warning(f"[mirror] erro {type(e).__name__}: {e}, fallback MySQL")
+
     query_pastas = text("SELECT DISTINCT activity_folder FROM ViewGrdAtividadesTarcisio WHERE activity_type='Verificar' AND activity_folder IS NOT NULL")
     query_status = text("SELECT DISTINCT activity_status FROM ViewGrdAtividadesTarcisio WHERE activity_type='Verificar' AND activity_status IS NOT NULL")
-    
+
     try:
         with _eng.connect() as conn:
             pastas = [row[0] for row in conn.execute(query_pastas).fetchall()]
@@ -54,6 +65,16 @@ def carregar_opcoes_mysql(_eng: Engine) -> Tuple[List[str], List[str]]:
 @st.cache_data(ttl=1800, hash_funcs={Engine: lambda _: None})
 def carregar_dados_mysql(_eng: Engine, dias_historico: int, pastas: List[str] = None, status: List[str] = None) -> pd.DataFrame:
     """Carrega atividades do banco usando filtros SQL."""
+    # Mirror first
+    if zion_mirror.is_enabled():
+        try:
+            df = zion_mirror.carregar_dados_mirror(dias_historico, pastas, status)
+            if df is not None:
+                logging.info(f"[mirror] {len(df)} dados carregados (dias={dias_historico})")
+                return df
+        except Exception as e:
+            logging.warning(f"[mirror] erro {type(e).__name__}: {e}, fallback MySQL")
+
     limite = date.today() - timedelta(days=dias_historico)
     
     base_query = """
