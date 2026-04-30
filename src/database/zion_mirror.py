@@ -28,10 +28,13 @@ def is_enabled() -> bool:
 
 
 def _list_all(params: dict, page_size: int = 5000) -> list[dict]:
+    """Pagina /activities com ?with_total=false (mirror salta SELECT count(*)
+    e fica 6-9x mais rapido em queries amplas). Para quando vier pagina < page_size.
+    """
     items: list[dict] = []
     offset = 0
     while True:
-        p = {**params, "limit": page_size, "offset": offset}
+        p = {**params, "limit": page_size, "offset": offset, "with_total": "false"}
         r = httpx.get(
             f"{MIRROR_URL}/activities",
             params=p,
@@ -42,8 +45,10 @@ def _list_all(params: dict, page_size: int = 5000) -> list[dict]:
         data = r.json()
         page = data.get("items", [])
         items.extend(page)
-        total = data.get("total", len(items))
-        if len(items) >= total or len(page) < page_size:
+        if len(page) < page_size:
+            break
+        total = data.get("total")
+        if total is not None and len(items) >= total:
             break
         offset += page_size
         if offset > 100000:
