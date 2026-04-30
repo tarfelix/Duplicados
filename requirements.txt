@@ -9,3 +9,4 @@ google-cloud-firestore
 altair
 passlib[bcrypt]
 openai>=1.12.0
+httpx>=0.27.0
